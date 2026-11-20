@@ -1,0 +1,8 @@
+Package {
+    name: "nabi_playground",
+    version: "0.1.0",
+    toolchain: "0.1",
+    deps: {
+        "web": Dep::path("web/nabi"),
+    },
+}

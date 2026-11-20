@@ -1,0 +1,14 @@
+// Standard input: the program reads the text in the Input box (the
+// button above the output) a line at a time. Here each line is a
+// number, and the program adds them up.
+fn main() throws {
+    let total = 0.0;
+    let count = 0;
+    try for line in io::stdin().lines() {
+        let t = line.trim();
+        if t.is_empty() { continue; }
+        total += try t.parse::<f64>();
+        count += 1;
+    }
+    println(f"{count} numbers, sum {total}");
+}

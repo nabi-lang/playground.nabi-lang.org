@@ -1,0 +1,1217 @@
+// playground.nabi-lang.org: the page and its compile service.
+//
+//   POST /api/compile?opt=0|2   body: one Nabi source file (UTF-8, at most
+//                               64 KiB). 200: the program as a
+//                               wasm32-unknown-unknown module, or nabic's
+//                               diagnostics as text with an
+//                               `X-Nabi-Diagnostics: 1` header; 400 / 413 /
+//                               429 / 503 / 504 for the request itself.
+//   POST /api/fmt               body: the same. 200: the source as
+//                               `nabi fmt` lays it out, or its
+//                               diagnostics (header as above).
+//   POST /api/share             body: the same. 200: the id of a short
+//                               link that holds the source, stored
+//                               under PLAY_SHARES (never compiled or
+//                               run here); 400 / 409 / 413 / 429 / 503.
+//   GET  /api/share/<id>        the stored source, or 404
+//   GET  /p/<id>                the page with that source in the editor
+//   GET  /ko, /ko/p/<id>        the same pages in Korean (lang.nabi)
+//   GET  /api/health            200 `ok` and the server's state, one
+//                               `key value` a line, for uptime checks
+//   GET  /...                   static/, then the web kit's files
+//                               (web/, built in) and its fonts
+//                               (/fonts/, web/assets/fonts), then
+//                               PLAY_SITE, and /nabi.mjs
+//
+// Each compile runs `nabic build --target=wasm32-unknown-unknown` in a
+// fresh directory with a clean environment, under PLAY_WRAP (a sandbox
+// command line such as bwrap's), killed after PLAY_TIMEOUT seconds (and
+// `PLAY_WRAP --kill` run then, which stops a container the killed client
+// left running); `nabi fmt` the same way, under FMT_TIMEOUT. At most
+// PLAY_JOBS run at once; past that a request waits up to PLAY_QUEUE
+// seconds for a turn. Finished modules are cached by the SHA-256 of
+// toolchain, packages, level and source, so a shared link compiles once.
+//
+// A program may use the packages PLAY_PACKAGES names (in dependency
+// order), prebuilt for wasm32 under PLAY_DEPS (as nabic sees it):
+// `<PLAY_DEPS>/debug/deps/<name>.nabihir` for -O0, `release/` for -O2,
+// which scripts/Dockerfile builds into the image.
+//
+// Settings come from the environment:
+//   PLAY_ADDR     127.0.0.1:8405    PLAY_NABIC    nabic
+//   PLAY_NABI     the `nabi` beside a PLAY_NABIC path, else nabi
+//   PLAY_SITE     ../nabi-lang.org/static
+//   PLAY_MJS      the toolchain's nabi.mjs; by default, for a PLAY_NABIC
+//                 path, <its dir>/../lib/nabi/targets/wasm32-unknown-unknown/
+//   PLAY_WRAP     ""                PLAY_WORK    <temp>/nabi-playground
+//   PLAY_JOBS     the CPU count     PLAY_TIMEOUT 20
+//   PLAY_QUEUE    10 (seconds a compile waits for a turn)
+//   PLAY_DEPS     ""  PLAY_PACKAGES  json,linalg,specfun,special,stats,..
+//   PLAY_RATE     30 (compiles per minute and client)
+//   PLAY_SHARES   <PLAY_WORK>/shares: stored share links, one file each
+//   PLAY_SHARE_RATE  10 (share links per minute and client)
+//   PLAY_SHARE_MAX   100000 (links kept; past it, new ones are refused)
+//   PLAY_CLIENT_HEADER  (none)  the header a trusted proxy sets with the
+//                 real client IP, e.g. cf-connecting-ip behind Cloudflare
+//                 or x-forwarded-for behind Caddy. Unset (the default),
+//                 the TCP peer is the client, so a client cannot forge it.
+
+mod lang;
+
+use core::crypto::HashAlgorithm;
+use std::env;
+use std::fs;
+use std::net;
+use std::net::TcpStream;
+use std::process;
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::SystemTime;
+use web::chrome;
+use web::http;
+use web::http::Request;
+use web::kit;
+use web::url;
+
+const MAX_SOURCE: usize = 65536;
+/// The packages a program may use by default, each after the ones it
+/// depends on; `alias=name` is `name` under another name (stats imports
+/// special as `specfun`).
+const PACKAGES: str = "json,linalg,autodiff,special,specfun=special,signal,units,stats,csv,csvio=csv,table,plot,ode,optimize,interpolate,spatial";
+const MAX_CONNS: i64 = 64;
+/// Cached modules kept; past it the least recently used quarter goes.
+const MAX_CACHED: usize = 256;
+/// The most diagnostics text a compile returns (bytes); past it, truncated.
+const MAX_DIAG: usize = 65536;
+/// The most a returned module may be (bytes); a 64 KiB source cannot
+/// honestly produce more, so a larger output is refused.
+const MAX_WASM: u64 = 33554432u64;
+/// Seconds `nabi fmt` may take: it only lexes and re-indents.
+const FMT_TIMEOUT: u64 = 5u64;
+/// Characters of a share id: lowercase RFC 4648 base32, 10 of them.
+const ID_CHARS: str = "abcdefghijklmnopqrstuvwxyz234567";
+const ID_LEN: usize = 10;
+
+static ACTIVE: Atomic<i64> = Atomic::new(0i64);
+static JOBS: Atomic<i64> = Atomic::new(0i64);
+static SEQ: Atomic<i64> = Atomic::new(0i64);
+/// Share links stored, counted at start and on each new one.
+static SHARES: Atomic<i64> = Atomic::new(0i64);
+
+struct Cfg {
+    addr: str;
+    nabic: str;
+    /// `nabi`, for `fmt`.
+    nabi: str;
+    site: str;
+    mjs: str;
+    /// The sandbox command line, split at spaces when used (a `List`
+    /// would not be `Sync`, and the config goes to every thread).
+    wrap: str;
+    work: str;
+    jobs: i64;
+    timeout: u64;
+    /// Seconds a request waits for a compile slot before a 503.
+    queue: i64 = 10i64;
+    /// Where the prebuilt packages are, as nabic sees it; "": none.
+    deps: str = "";
+    /// The packages a program may use, in dependency order, `,` joined.
+    packages: str = "";
+    rate: i64;
+    client_header: str;
+    shares: str;
+    share_rate: i64;
+    share_max: i64;
+    /// The og:image version: the first 10 hex digits of og.png's SHA-256,
+    /// put in place of index.html's `og.png?v=dev` when it is served.
+    og: str;
+    /// The toolchain's release (`nabic --version`), put in place of
+    /// index.html's `nabi dev`.
+    release: str;
+}
+
+fn setting(k: str, dflt: str) -> str {
+    let v = try env::var(k) catch _ { "" };
+    if v.is_empty() { dflt } else { v }
+}
+
+fn words(s: str) -> List<str> {
+    let out: List<str> = List::new();
+    for w in s.split_whitespace() { out.push(w); }
+    out
+}
+
+/// `0.1.6` from `nabic 0.1.6 (d0c8492ae 2026-11-01)`, or `dev`.
+fn nabic_release(nabic: str) -> str {
+    let o = try Command::new(nabic).args(["--version"]).stdin(Stdio::Null).output() catch _ { return "dev"; };
+    let w = words((try? str::from_utf8(o.stdout)) ?? "");
+    if o.status.success() && w.len() > 1 { w[1] } else { "dev" }
+}
+
+/// The `nabi` beside the toolchain's `nabic` (a path), else `nabi`.
+fn find_nabi(nabic: str) -> str {
+    if let k: usize = nabic.rfind("/") { return nabic[:k] + "/nabi"; }
+    "nabi"
+}
+
+/// The nabi.mjs of the toolchain at `nabic` (a path): its wasm32 runtime's.
+fn find_mjs(nabic: str) -> str {
+    if let k: usize = nabic.rfind("/") { return nabic[:k] + "/../lib/nabi/targets/wasm32-unknown-unknown/nabi.mjs"; }
+    ""
+}
+
+fn load_cfg() throws -> Cfg {
+    let nabic = setting("PLAY_NABIC", "nabic");
+    let mjs = setting("PLAY_MJS", find_mjs(nabic));
+    let work = setting("PLAY_WORK", env::temp_dir().as_str() + "/nabi-playground");
+    let jobs = try setting("PLAY_JOBS", f"{task::cpu_count()}").parse::<i64>();
+    let queue = try setting("PLAY_QUEUE", "10").parse::<i64>();
+    let timeout = try setting("PLAY_TIMEOUT", "20").parse::<u64>();
+    let rate = try setting("PLAY_RATE", "30").parse::<i64>();
+    let share_rate = try setting("PLAY_SHARE_RATE", "10").parse::<i64>();
+    let share_max = try setting("PLAY_SHARE_MAX", "100000").parse::<i64>();
+    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), share_rate: share_rate, share_max: share_max, queue: queue, deps: setting("PLAY_DEPS", ""), packages: setting("PLAY_PACKAGES", packages_of(setting("PLAY_DEPS", ""))), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic) }
+}
+
+/// The packages warm.sh built into `deps` (its `packages` file, when
+/// the server can read it), else PACKAGES.
+fn packages_of(deps: str) -> str {
+    if deps.is_empty() { return PACKAGES; }
+    let t = (try fs::read_to_str(deps + "/packages") catch _ { "" }).trim();
+    if t.is_empty() { PACKAGES } else { t }
+}
+
+/// The version of the og.png that `/og.png` serves from `roots`, or
+/// `dev` without one.
+fn og_version(roots: List<str>) -> str {
+    for root in roots {
+        let data = try fs::read(root + "/og.png") catch _ { continue; };
+        return http::version(data);
+    }
+    "dev"
+}
+
+fn bytes_of(s: str) -> List<u8> {
+    let b: List<u8> = List::new();
+    for x in s.as_bytes() { b.push(x); }
+    b
+}
+
+struct Resp {
+    status: i32;
+    headers: List<str>;
+    body: List<u8>;
+}
+
+fn text(status: i32, msg: str) -> Resp {
+    Resp { status: status, headers: ["Content-Type: text/plain; charset=utf-8", "Cache-Control: no-store"], body: bytes_of(msg) }
+}
+
+/// A program that does not compile is an answer, not a failed request:
+/// 200, so the page's console stays clean, marked by its header.
+fn diagnostics(msg: str) -> Resp {
+    let r = text(200, msg);
+    r.headers.push("X-Nabi-Diagnostics: 1");
+    r
+}
+
+fn hex(bytes: List<u8>) -> str {
+    let digits = "0123456789abcdef";
+    let out = StrBuf::new();
+    for b in bytes {
+        out.push_str(digits[(b >> 4u8) as usize:(b >> 4u8) as usize + 1]);
+        out.push_str(digits[(b & 15u8) as usize:(b & 15u8) as usize + 1]);
+    }
+    out.to_str()
+}
+
+/// A client's requests in its current one-minute window.
+struct Window {
+    start: i64;
+    count: i64;
+}
+
+static CLIENTS: Mutex<Dict<str, Window>> = Mutex::new(Dict::new());
+
+fn now_secs() -> i64 { SystemTime::now().unix_secs() }
+
+fn allow(client: str, rate: i64) -> bool {
+    using g = CLIENTS.lock() {
+        let d = g.get();
+        let t = now_secs();
+        // Drop windows older than the minute so the table stays small,
+        // without resetting everyone (which an attacker could force).
+        if d.len() > 2048 {
+            let keep: Dict<str, Window> = Dict::new();
+            for (k, w) in d.iter() {
+                if t - w.start < 60i64 { keep.insert(k, w); }
+            }
+            d = keep;
+            g.set(d);
+        }
+        let w = d.get(client) ?? Window { start: t, count: 0i64 };
+        if t - w.start >= 60i64 { w = Window { start: t, count: 0i64 }; }
+        w.count += 1i64;
+        d.insert(client, w);
+        w.count <= rate
+    }
+}
+
+/// The client for rate limiting. Without a trusted-proxy header the TCP
+/// peer is used, so a client cannot forge its identity; a direct client's
+/// own X-Forwarded-For is ignored. With one (PLAY_CLIENT_HEADER), its
+/// value is trusted, taking the LAST entry of a list header, which is the
+/// one the proxy appended (a client may prepend fakes, not append).
+fn client_of(s: TcpStream, r: Request, header: str) -> str {
+    if !header.is_empty() {
+        let v = r.header(header);
+        if !v.is_empty() {
+            if let k: usize = v.rfind(",") { return v[k + 1:].trim(); }
+            return v.trim();
+        }
+    }
+    let a = try s.peer_addr() catch _ { return "?"; };
+    let t = f"{a}";
+    if let k: usize = t.rfind(":") { t[:k] } else { t }
+}
+
+/// What the playground does not compile: reading files at compile time
+/// (`include_str!`, `include_bytes!`, `#[path]`, WIT imports). The
+/// sandbox is what keeps the server's files out of reach; this only says
+/// so plainly.
+/// Only code counts: a comment or a string that names one of them is
+/// fine.
+fn refused(src: str) -> str | none {
+    let code = code_only(src);
+    let dense = StrBuf::new();
+    for c in code.chars() {
+        if !c.is_whitespace() { dense.push(c); }
+    }
+    let flat = dense.to_str();
+    for (word, what) in [("include_str", "include_str!"), ("include_bytes", "include_bytes!")] {
+        if has_word(code, word) { return refusal(what); }
+    }
+    for (word, what) in [("#[path", "#[path(..)]"), ("#![path", "#[path(..)]"), ("wit::import", "WIT imports"), ("wit::export", "WIT exports")] {
+        if flat.contains(word) { return refusal(what); }
+    }
+    none
+}
+
+fn refusal(what: str) -> str {
+    f"error: the playground does not compile {what}: a program here is one file and reads nothing at compile time\n"
+}
+
+fn is_ident(c: char) -> bool { c.is_alphanumeric() || c == '_' }
+
+/// Whether `word` is in `code` as a whole identifier.
+fn has_word(code: str, word: str) -> bool {
+    let from = 0usize;
+    while let k: usize = code[from:].find(word) {
+        let at = from + k;
+        let end = at + word.len();
+        let before = if at == 0 { ' ' } else { code[:at].chars().last() ?? ' ' };
+        let after = code[end:].chars().next() ?? ' ';
+        if !is_ident(before) && !is_ident(after) { return true; }
+        from = end;
+    }
+    false
+}
+
+/// `src` with its comments and the text of its string and char literals
+/// blanked; an f-string's `{..}` parts stay, as they are code.
+fn code_only(src: str) -> str {
+    let cs: List<char> = List::new();
+    for c in src.chars() { cs.push(c); }
+    let out = StrBuf::new();
+    let n = cs.len();
+    let i = 0usize;
+    while i < n {
+        let c = cs[i];
+        let next = if i + 1 < n { cs[i + 1] } else { ' ' };
+        if c == '/' && next == '/' {
+            while i < n && cs[i] != '\n' { i += 1; }
+            continue;
+        }
+        if c == '/' && next == '*' {
+            let depth = 0usize;
+            while i < n {
+                if i + 1 < n && cs[i] == '/' && cs[i + 1] == '*' { depth += 1; i += 2; continue; }
+                if i + 1 < n && cs[i] == '*' && cs[i + 1] == '/' {
+                    depth -= 1;
+                    i += 2;
+                    if depth == 0 { break; }
+                    continue;
+                }
+                i += 1;
+            }
+            out.push(' ');
+            continue;
+        }
+        if c == 'r' && (next == '"' || next == '#') && (i == 0 || !is_ident(cs[i - 1])) {
+            // r"..", r#".."#
+            let j = i + 1;
+            let hashes = 0usize;
+            while j < n && cs[j] == '#' { hashes += 1; j += 1; }
+            if j < n && cs[j] == '"' {
+                j += 1;
+                while j < n {
+                    if cs[j] == '"' {
+                        let h = 0usize;
+                        while h < hashes && j + 1 + h < n && cs[j + 1 + h] == '#' { h += 1; }
+                        if h == hashes { j += 1 + hashes; break; }
+                    }
+                    j += 1;
+                }
+                out.push_str("r\"\"");
+                i = j;
+                continue;
+            }
+        }
+        if c == '"' {
+            let fmt = i > 0 && cs[i - 1] == 'f';
+            out.push('"');
+            i += 1;
+            while i < n && cs[i] != '"' {
+                if cs[i] == '\\' { i += 2; continue; }
+                if fmt && cs[i] == '{' {
+                    if i + 1 < n && cs[i + 1] == '{' { i += 2; continue; }
+                    let depth = 0usize;
+                    while i < n {
+                        if cs[i] == '{' { depth += 1; }
+                        if cs[i] == '}' {
+                            depth -= 1;
+                            if depth == 0 { break; }
+                        }
+                        out.push(cs[i]);
+                        i += 1;
+                    }
+                    out.push(' ');
+                }
+                i += 1;
+            }
+            out.push('"');
+            i += 1;
+            continue;
+        }
+        if c == '\'' {
+            // 'x', '\n', '\u{..}'; a lone ' (a label) stays.
+            if next == '\\' {
+                let j = i + 2;
+                while j < n && cs[j] != '\'' && cs[j] != '\n' { j += 1; }
+                if j < n && cs[j] == '\'' { out.push_str("' '"); i = j + 1; continue; }
+            } else if i + 2 < n && cs[i + 2] == '\'' {
+                out.push_str("' '");
+                i += 3;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out.to_str()
+}
+
+/// nabic's diagnostics as the reader should see them: the work
+/// directory's paths gone, the progress lines dropped.
+fn tidy(err: str, dir: str) -> str {
+    let out = StrBuf::new();
+    for line in err.replace(dir + "/", "").lines() {
+        let t = line.trim();
+        if t.starts_with("Compiling ") || t.starts_with("Building ") || t.starts_with("Finished ") { continue; }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.to_str().trim_end() + "\n"
+}
+
+fn compile(cfg: Cfg, src: str, opt: str) -> Resp {
+    let key = hex(HashAlgorithm::Sha256.digest(f"{cfg.release}\n{cfg.deps}\n{cfg.packages}\n{opt}\n{src}".as_bytes()));
+    let cached = cfg.work + "/cache/" + key + ".wasm";
+    if fs::exists(cached) {
+        let wasm = try fs::read(cached) catch _ { List::new() };
+        if wasm.len() > 0 {
+            touch(cached, wasm);
+            return Resp { status: 200, headers: ["Content-Type: application/wasm", "Cache-Control: no-store", "X-Nabi-Cache: hit"], body: wasm };
+        }
+    }
+    if !take_slot(cfg) { return busy(); }
+    let r = run_nabic(cfg, src, opt, key);
+    JOBS.fetch_sub(1i64);
+    r
+}
+
+/// Requests waiting for a compile slot.
+static WAITING: Atomic<i64> = Atomic::new(0i64);
+
+/// A compile slot, waited for up to PLAY_QUEUE seconds; false when none
+/// came, or when the queue is already four times PLAY_JOBS long.
+fn take_slot(cfg: Cfg) -> bool {
+    if JOBS.fetch_add(1i64) < cfg.jobs { return true; }
+    JOBS.fetch_sub(1i64);
+    if WAITING.fetch_add(1i64) >= 4i64 * cfg.jobs {
+        WAITING.fetch_sub(1i64);
+        return false;
+    }
+    let t0 = Instant::now();
+    let got = false;
+    while t0.elapsed().as_ms() < cfg.queue * 1000i64 {
+        thread::sleep(Duration::ms(50));
+        if JOBS.fetch_add(1i64) < cfg.jobs {
+            got = true;
+            break;
+        }
+        JOBS.fetch_sub(1i64);
+    }
+    WAITING.fetch_sub(1i64);
+    got
+}
+
+/// A cache hit renews its file's time, so eviction takes the least
+/// recently used first; at most once a minute per file.
+fn touch(path: str, data: List<u8>) {
+    let md = try fs::metadata(path) catch _ { return; };
+    let t = try md.modified() catch _ { return; };
+    if now_secs() - t.unix_secs() < 60i64 { return; }
+    try fs::write(path, data) catch _ {};
+}
+
+/// Room for one more file in `dir`: with `max` or more there, the least
+/// recently used quarter goes.
+fn make_room(dir: str, max: usize) {
+    let all: List<(i64, str)> = List::new();
+    for e in (try fs::read_dir(dir) catch _ { return; }).results() {
+        let ent = try e.get() catch _ { continue; };
+        let name = ent.file_name();
+        let md = try fs::metadata(dir + "/" + name) catch _ { continue; };
+        let t = try md.modified() catch _ { continue; };
+        all.push((t.unix_nanos(), name));
+    }
+    if all.len() < max { return; }
+    all.sort_by_key(|x: (i64, str)| x.0);
+    let excess = all.len() - max + max / 4;
+    for k in 0..excess { try fs::remove_file(dir + "/" + all[k].1) catch _ {}; }
+}
+
+fn busy() -> Resp {
+    let r = text(503, "The compile server is busy; try again in a moment.");
+    r.headers.push("Retry-After: 5");
+    r
+}
+
+/// The packages `src` may use, each as nabic's `--extern`, when it names
+/// one of them (`stats::`, `use plot`); none otherwise, which keeps a
+/// plain program's build as small as before.
+fn externs(cfg: Cfg, src: str, opt: str) -> List<str> {
+    let out: List<str> = List::new();
+    if cfg.deps.is_empty() { return out; }
+    let names: List<(str, str)> = List::new();
+    for n in cfg.packages.split(",") {
+        let (alias, file) = n.split_once("=") ?? (n, n);
+        if !alias.trim().is_empty() { names.push((alias.trim(), file.trim())); }
+    }
+    let used = false;
+    for (n, _) in names {
+        if src.contains(n + "::") || src.contains("use " + n) { used = true; }
+    }
+    if !used { return out; }
+    let profile = if opt == "0" { "debug" } else { "release" };
+    for (n, file) in names {
+        out.push("--extern");
+        out.push(f"{n}={cfg.deps}/{profile}/deps/{file}.nabihir");
+    }
+    out
+}
+
+fn run_nabic(cfg: Cfg, src: str, opt: str, key: str) -> Resp {
+    let dir = f"{cfg.work}/jobs/{std::process::id()}-{SEQ.fetch_add(1i64)}";
+    try fs::create_dir_all(dir) catch e { return text(500, f"work directory: {e}"); };
+    let resp = build_in(cfg, src, opt, key, dir);
+    try fs::remove_dir_all(dir) catch _ {};
+    resp
+}
+
+/// Runs `prog <args>` (`nabic` or `nabi`) in `dir` under the sandbox, its
+/// output in `dir/tool.log`: whether it succeeded, or the answer when it
+/// could not run or took longer than `secs`.
+fn run_tool(cfg: Cfg, prog: str, dir: str, args: List<str>, secs: u64, what: str) -> bool | Resp {
+    let log = try fs::create(dir + "/tool.log") catch e { return text(500, f"work directory: {e}"); };
+    let log2 = try log.try_clone() catch e {
+        try log.close() catch _ {};
+        return text(500, f"work directory: {e}");
+    };
+    let argv: List<str> = List::new();
+    for w in words(cfg.wrap) { argv.push(w); }
+    argv.push(prog);
+    for a in args { argv.push(a); }
+    let cmd = sandboxed(Command::new(argv[0]).args(argv[1:argv.len()].to_list()).current_dir(dir), dir, secs)
+        .stdin(Stdio::Null).stdout(Stdio::File(log)).stderr(Stdio::File(log2)).kill_on_drop(true);
+    // The command owns both log files and closes them once spawned.
+    let child = try cmd.spawn() catch e { return text(500, f"cannot start {prog}: {e}"); };
+    let t0 = Instant::now();
+    let limit = (secs as i64) * 1000i64;
+    loop {
+        let st = try child.try_wait() catch e { return text(500, f"{prog}: {e}"); };
+        if let s: std::process::ExitStatus = st { return s.success(); }
+        if t0.elapsed().as_ms() > limit {
+            try child.kill() catch _ {};
+            try child.wait() catch _ {};
+            stop_sandbox(cfg, dir, secs);
+            return text(504, f"{what} took longer than {secs} s and was stopped.");
+        }
+        thread::sleep(Duration::ms(25));
+    }
+}
+
+/// `cmd` with a clean environment: no NABI_* / NABIC_* settings reach the
+/// tool, its home and caches are the job's own directory. The sandbox's
+/// own settings (PLAY_IMAGE, PLAY_MEM, PLAY_CPUS, DOCKER_HOST) and
+/// PLAY_DEPS (bwrap binds it) pass through to the wrap command, and
+/// PLAY_LIMIT tells it the time limit;
+/// scripts/sandbox.sh clears them before the tool runs.
+fn sandboxed(cmd: Command, dir: str, secs: u64) -> Command {
+    let c = cmd.env_clear()
+        .env("PATH", "/usr/bin:/bin").env("HOME", dir).env("TMPDIR", dir).env("NABI_HOME", dir + "/.nabi")
+        .env("XDG_CACHE_HOME", dir + "/.cache").env("NO_COLOR", "1").env("NABI_INCREMENTAL", "0")
+        .env("PLAY_LIMIT", f"{secs}");
+    for k in ["PLAY_IMAGE", "PLAY_MEM", "PLAY_CPUS", "DOCKER_HOST", "PLAY_DEPS"] {
+        let v = try env::var(k) catch _ { "" };
+        if !v.is_empty() { c = c.env(k, v); }
+    }
+    c
+}
+
+/// After a timeout: `PLAY_WRAP --kill` in the job directory, so a
+/// sandbox that outlives its killed client (a container) is stopped
+/// too; waited for up to 10 s.
+fn stop_sandbox(cfg: Cfg, dir: str, secs: u64) {
+    let argv = words(cfg.wrap);
+    if argv.is_empty() { return; }
+    argv.push("--kill");
+    let child = try sandboxed(Command::new(argv[0]).args(argv[1:argv.len()].to_list()).current_dir(dir), dir, secs)
+        .stdin(Stdio::Null).stdout(Stdio::Null).stderr(Stdio::Null).spawn() catch e {
+            eprintln(f"stop sandbox: {e}");
+            return;
+        };
+    let t0 = Instant::now();
+    loop {
+        let st = try child.try_wait() catch _ { return; };
+        if st is std::process::ExitStatus { return; }
+        if t0.elapsed().as_ms() > 10000i64 {
+            try child.kill() catch _ {};
+            try child.wait() catch _ {};
+            eprintln("stop sandbox: still running after 10 s");
+            return;
+        }
+        thread::sleep(Duration::ms(25));
+    }
+}
+
+fn build_in(cfg: Cfg, src: str, opt: str, key: str, dir: str) -> Resp {
+    try fs::write(dir + "/main.nabi", src) catch e { return text(500, f"work directory: {e}"); };
+    let args: List<str> = ["build", "--target=wasm32-unknown-unknown", "-O" + opt, "--target-dir", "t"];
+    args.extend(externs(cfg, src, opt));
+    for a in ["main.nabi", "-o", "main.wasm"] { args.push(a); }
+    let ran = run_tool(cfg, cfg.nabic, dir, args, cfg.timeout, "Compiling");
+    if let r: Resp = ran { return r; }
+    let ok = if let b: bool = ran { b } else { false };
+    let err = try fs::read_to_str(dir + "/tool.log") catch _ { "" };
+    if !ok || !fs::exists(dir + "/main.wasm") {
+        let diag = tidy(err, dir);
+        return diagnostics(if diag.len() > MAX_DIAG { diag[:MAX_DIAG] + "\n... (truncated)\n" } else { diag });
+    }
+    let md = try fs::symlink_metadata(dir + "/main.wasm") catch e { return text(500, f"nabic output: {e}"); };
+    // The compile runs as this same user in a writable job dir; never
+    // follow a planted symlink, and never ship an implausibly large module.
+    if !md.is_file() { return diagnostics("the build did not produce a module\n"); }
+    if md.len() > MAX_WASM { return diagnostics("the module is too large\n"); }
+    let wasm = try fs::read(dir + "/main.wasm") catch e { return text(500, f"nabic output: {e}"); };
+    try fs::create_dir_all(cfg.work + "/cache") catch _ {};
+    make_room(cfg.work + "/cache", MAX_CACHED);
+    try fs::rename(dir + "/main.wasm", cfg.work + "/cache/" + key + ".wasm") catch _ {};
+    Resp { status: 200, headers: ["Content-Type: application/wasm", "Cache-Control: no-store", "X-Nabi-Cache: miss"], body: wasm }
+}
+
+/// `nabi fmt` on the source, in a job directory of its own: the source
+/// laid out, or why not. `nabi fmt` only lexes the one file it is given,
+/// but it runs sandboxed like a build all the same.
+fn format(cfg: Cfg, src: str) -> Resp {
+    if !take_slot(cfg) { return busy(); }
+    let dir = f"{cfg.work}/jobs/{std::process::id()}-{SEQ.fetch_add(1i64)}";
+    let r = format_in(cfg, src, dir);
+    try fs::remove_dir_all(dir) catch _ {};
+    JOBS.fetch_sub(1i64);
+    r
+}
+
+fn format_in(cfg: Cfg, src: str, dir: str) -> Resp {
+    try fs::create_dir_all(dir) catch e { return text(500, f"work directory: {e}"); };
+    try fs::write(dir + "/main.nabi", src) catch e { return text(500, f"work directory: {e}"); };
+    let ran = run_tool(cfg, cfg.nabi, dir, ["fmt", "main.nabi"], FMT_TIMEOUT, "Formatting");
+    if let r: Resp = ran { return r; }
+    let ok = if let b: bool = ran { b } else { false };
+    if !ok {
+        // `nabi fmt` names the file `<fmt>`; here it is main.nabi.
+        let err = (try fs::read_to_str(dir + "/tool.log") catch _ { "" }).replace("<fmt>:", "main.nabi:");
+        let diag = tidy(err, dir);
+        return diagnostics(if diag.len() > MAX_DIAG { diag[:MAX_DIAG] + "\n... (truncated)\n" } else { diag });
+    }
+    // Layout only re-indents, so the result is about the source's size;
+    // never follow a planted symlink, never return much more.
+    let md = try fs::symlink_metadata(dir + "/main.nabi") catch e { return text(500, f"nabi fmt output: {e}"); };
+    if !md.is_file() || md.len() > (MAX_SOURCE * 4) as u64 { return diagnostics("nabi fmt did not leave a usable file\n"); }
+    let out = try fs::read_to_str(dir + "/main.nabi") catch e { return diagnostics(f"nabi fmt output: {e}\n"); };
+    text(200, out)
+}
+
+/// The id of `src`, and the name of the file a share link stores it in:
+/// the first 50 bits of its SHA-256 in base32, so the same code is
+/// always the same link.
+fn share_id(src: str) -> str {
+    let d = HashAlgorithm::Sha256.digest(src.as_bytes());
+    let v = 0u64;
+    for k in 0..8 { v = (v << 8u64) | (d[k] as u64); }
+    let out = StrBuf::new();
+    for k in 0..ID_LEN {
+        let i = ((v >> (59u64 - 5u64 * (k as u64))) & 31u64) as usize;
+        out.push_str(ID_CHARS[i:i + 1]);
+    }
+    out.to_str()
+}
+
+/// Whether `id` could be a share id; anything else never reaches the
+/// file system.
+fn valid_id(id: str) -> bool {
+    if id.len() != ID_LEN { return false; }
+    for c in id.chars() {
+        if !ID_CHARS.contains(f"{c}") { return false; }
+    }
+    true
+}
+
+/// Store `src` and answer its id. An existing file is never rewritten:
+/// the same id holds the same code, and a different code under it (a
+/// hash collision) is refused, so the page falls back to a #code link.
+fn share(cfg: Cfg, src: str) -> Resp {
+    let id = share_id(src);
+    let path = cfg.shares + "/" + id + ".nabi";
+    if fs::exists(path) {
+        let old = try fs::read_to_str(path) catch _ { "" };
+        return if old == src { text(200, id) } else { text(409, "Cannot make a short link for this code.") };
+    }
+    if SHARES.load() >= cfg.share_max { return text(503, "No room for new short links."); }
+    try fs::create_dir_all(cfg.shares) catch e {
+        eprintln(f"share: {e}");
+        return text(500, "Cannot store the link.");
+    };
+    try fs::write_atomic(path, src) catch e {
+        eprintln(f"share: {e}");
+        return text(500, "Cannot store the link.");
+    };
+    SHARES.fetch_add(1i64);
+    text(200, id)
+}
+
+/// The source stored under `id`, or none.
+fn shared(cfg: Cfg, id: str) -> str | none {
+    if !valid_id(id) { return none; }
+    let path = cfg.shares + "/" + id + ".nabi";
+    let md = try fs::symlink_metadata(path) catch _ { return none; };
+    if !md.is_file() || md.len() > MAX_SOURCE as u64 { return none; }
+    try fs::read_to_str(path) catch _ { none }
+}
+
+fn count_shares(dir: str) -> i64 {
+    let n = 0i64;
+    for e in (try fs::read_dir(dir) catch _ { return 0i64; }).results() {
+        let ent = try e.get() catch _ { continue; };
+        if ent.file_name().ends_with(".nabi") { n += 1i64; }
+    }
+    n
+}
+
+/// The page with a stored source in it: in a hidden <pre> the script
+/// reads (the newline after <pre> is the one the parser drops), and kept
+/// out of search results.
+fn shared_page(cfg: Cfg, src: str, at: str, ko: bool) -> Resp | none {
+    let r = page_in(cfg, "static/index.html", at, ko) ?? { return none; };
+    let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return none; };
+    // index.html has one <title> and one <main>.
+    r.body = bytes_of(html.replace("<title>", "<meta name=\"robots\" content=\"noindex\">\n<title>")
+        .replace("<main ", f"<pre id=\"shared\" hidden>\n{chrome::esc(src)}</pre>\n<main "));
+    r
+}
+
+/// The page's own headers: scripts and workers from here only (and the
+/// Cloudflare Web Analytics beacon the proxy injects), wasm compiled from
+/// what the API returns, fonts from here (the kit's). Style
+/// attributes are allowed only because WebKit's own <select> shadow DOM
+/// uses them; an attribute cannot hold a selector, and anything it loads
+/// still meets img-src/font-src. <style> and stylesheets stay strict.
+const CSP: str = "Content-Security-Policy: default-src 'self'; script-src 'self' 'wasm-unsafe-eval' https://static.cloudflareinsights.com; worker-src 'self'; style-src 'self'; style-src-attr 'unsafe-inline'; font-src 'self'; img-src 'self' data:; connect-src 'self' https://cloudflareinsights.com; object-src 'none'; base-uri 'none'; frame-ancestors 'none'" + http::REPORT_TO;
+
+fn file_resp(path: str) -> Resp | none {
+    let data = try fs::read(path) catch _ { return none; };
+    Resp { status: 200, headers: [f"Content-Type: {http::content_type(path)}", "Cache-Control: no-cache", CSP, http::REPORTING], body: data }
+}
+
+/// A file of the web kit, by its public path.
+fn kit_resp(path: str) -> Resp | none {
+    let f = kit::find(path[1:]) ?? { return none; };
+    let b: List<u8> = List::new();
+    for x in f.data { b.push(x); }
+    Resp { status: 200, headers: [f"Content-Type: {http::content_type(f.name)}", "Cache-Control: no-cache", CSP, http::REPORTING], body: b }
+}
+
+/// A webfont of the kit (`/fonts/...`), from its files beside the server
+/// (kit::FONTS_DIR): they are not built in.
+fn font_resp(path: str) -> Resp | none {
+    let rest = path.strip_prefix("/fonts/") ?? { return none; };
+    if rest.ends_with(".md") { return none; }
+    file_resp(http::static_file(kit::FONTS_DIR, "/" + rest) ?? { return none; })
+}
+
+/// The pages' shared markup, from the kit's chrome: each
+/// `<!--web:name-->` placeholder replaced.
+fn fill(html: str, ko: bool) -> str {
+    let sites = chrome::Sites { home: "https://nabi-lang.org", docs: if ko { "https://docs.nabi-lang.org/latest/ko" } else { "https://docs.nabi-lang.org/latest" }, registry: "https://packages.nabi-lang.org", playground: lang::path_in("/", ko), current: "playground" };
+    let lost = if ko {
+        chrome::not_found("페이지를 찾을 수 없습니다", "이 주소에는 페이지가 없습니다.", [("/ko", "플레이그라운드로 돌아가기")])
+    } else {
+        chrome::not_found("Page not found", "There is no page at this address.", [("/", "Back to the playground")])
+    };
+    let made = if ko { chrome::MADE_BY_KO } else { chrome::MADE_BY };
+    html.replace("<!--web:fonts-->\n", chrome::fonts_in("/", ko)).replace("<!--web:theme-button-->", chrome::theme_button(ko)).replace("<!--web:header-sites-->", chrome::header_sites(sites, ko)).replace("<!--web:credits-->", f"<span>{chrome::LICENSE}</span> · {made}").replace("<!--web:social-->", chrome::SOCIAL).replace("<!--web:theme-seg-->", chrome::theme_seg(ko)).replace("<!--web:not-found-->", lost).replace("<!--web:wordmark-->", chrome::wordmark("Nabi"))
+            .replace("<!--web:icons-->\n", chrome::icons("/"))
+}
+
+/// The note's list of the packages a program may use, each linked to
+/// its page on the registry.
+fn packages_note(cfg: Cfg, ko: bool) -> str {
+    if cfg.deps.is_empty() { return ""; }
+    let names: List<str> = List::new();
+    for n in cfg.packages.split(",") {
+        let (alias, _) = n.split_once("=") ?? (n, n);
+        let a = alias.trim();
+        if !a.is_empty() && !n.contains("=") { names.push(f"<a href=\"https://packages.nabi-lang.org/packages/{chrome::esc(a)}\">{chrome::esc(a)}</a>"); }
+    }
+    if names.is_empty() { return ""; }
+    names.sort();
+    let head = if ko { " 공식 패키지를 바로 쓸 수 있습니다: " } else { " Official packages are ready to use: " };
+    head + names.join(", ") + "."
+}
+
+/// A page with the og:image version, the shared markup and the asset
+/// versions filled in: a new og.png is a new URL, so link previews
+/// refetch it.
+fn page_resp(cfg: Cfg, path: str) -> Resp | none { page_in(cfg, path, "/", false) }
+
+/// page_resp for the page at `at` (without /ko), in Korean if `ko`.
+fn page_in(cfg: Cfg, path: str, at: str, ko: bool) -> Resp | none {
+    let r = file_resp(path) ?? { return none; };
+    if !path.ends_with(".html") { return r; }
+    let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return r; };
+    let local = lang::page(html, ko).replace("<!--play:langs-->", lang::switch(at, ko)).replace("<!--play:packages-->", packages_note(cfg, ko));
+    r.body = bytes_of(stamp(cfg, fill(local.replace("og.png?v=dev", "og.png?v=" + cfg.og).replace("nabi dev →", f"nabi {cfg.release} →"), ko)));
+    r
+}
+
+/// The stylesheets and scripts a page names, as `"/x?v=<version>"`, so
+/// a browser keeps each until it changes.
+fn stamp(cfg: Cfg, html: str) -> str {
+    let out = html;
+    for p in ["/nabi.css", "/play.css", "/theme.js", "/play.js"] {
+        if let x: Resp = asset(cfg, p) { out = out.replace(f"\"{p}\"", f"\"{p}?v={http::version(x.body)}\""); }
+    }
+    out
+}
+
+/// The file under `root` that canonical path `p` names, as a page.
+fn site_file(cfg: Cfg, root: str, p: str) -> Resp | none {
+    let f = http::page_file(root, p) ?? { return none; };
+    page_resp(cfg, f)
+}
+
+/// The file at public path `p`: static/, then the kit and its fonts,
+/// then PLAY_SITE.
+fn asset(cfg: Cfg, p: str) -> Resp | none {
+    // the TypeScript the page scripts are built from is not served
+    let own: Resp | none = if kit::is_source(p.trim_start_matches("/")) { none } else { site_file(cfg, "static", p) };
+    own ?? kit_resp(p) ?? font_resp(p) ?? site_file(cfg, cfg.site, p)
+}
+
+/// A file answer's caching: a page for five minutes, the kit's fonts
+/// (unversioned names) for a day, a file asked for by its current `?v=`
+/// for a year, anything else revalidated each time; always an ETag of
+/// the content, and 304 when the client holds it.
+fn cached(x: Resp, page: bool, r: Request) -> Resp {
+    let tag = http::etag(x.body);
+    let cc = if page {
+        "Cache-Control: public, max-age=300"
+    } else if r.path.starts_with("/fonts/") {
+        "Cache-Control: public, max-age=86400"
+    } else if http::is_current(r.query, x.body) {
+        http::IMMUTABLE
+    } else {
+        http::REVALIDATE
+    };
+    // headers[1] is file_resp's and kit_resp's Cache-Control.
+    x.headers[1] = cc;
+    x.headers.push("ETag: " + tag);
+    if http::not_modified(r, tag) { return Resp { status: 304, headers: [cc, "ETag: " + tag], body: List::new() }; }
+    x
+}
+
+fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
+    let p = r.path;
+    if p == http::REPORT_PATH {
+        if r.method != "POST" { return text(405, "POST only."); }
+        if let line: str = http::csp_report(r.body) { eprintln(line); }
+        return Resp { status: 204, headers: ["Cache-Control: no-store"], body: List::new() };
+    }
+    if p == "/api/compile" {
+        if r.method != "POST" { return text(405, "POST the source to /api/compile."); }
+        if !allow(client_of(s, r, cfg.client_header), cfg.rate) { return text(429, f"More than {cfg.rate} compiles a minute; wait a little."); }
+        let opt = if r.query.contains("opt=2") { "2" } else { "0" };
+        if r.body.trim().is_empty() { return text(400, "Nothing to compile."); }
+        if let why: str = refused(r.body) { return diagnostics(why); }
+        return compile(cfg, r.body, opt);
+    }
+    if p == "/api/fmt" {
+        if r.method != "POST" { return text(405, "POST the source to /api/fmt."); }
+        if !allow(client_of(s, r, cfg.client_header), cfg.rate) { return text(429, f"More than {cfg.rate} requests a minute; wait a little."); }
+        if r.body.trim().is_empty() { return text(400, "Nothing to format."); }
+        return format(cfg, r.body);
+    }
+    if p == "/api/share" {
+        if r.method != "POST" { return text(405, "POST the source to /api/share."); }
+        // Its own budget, apart from compiles.
+        if !allow("share " + client_of(s, r, cfg.client_header), cfg.share_rate) { return text(429, f"More than {cfg.share_rate} links a minute; wait a little."); }
+        if r.body.trim().is_empty() { return text(400, "Nothing to share."); }
+        return share(cfg, r.body);
+    }
+    if r.method != "GET" && r.method != "HEAD" { return text(405, "Only GET here."); }
+    if p == "/api/health" { return health(cfg); }
+    if p.starts_with("/api/share/") {
+        let src = shared(cfg, p["/api/share/".len():]) ?? { return text(404, "No such link."); };
+        return text(200, src);
+    }
+    if p == "/nabi.mjs" && !cfg.mjs.is_empty() {
+        if let f: Resp = file_resp(cfg.mjs) { return cached(f, false, r); }
+    }
+    if let c: str = url::canonical(p) {
+        return Resp { status: 301, headers: [url::moved(c, r.query), "Cache-Control: public, max-age=3600"], body: List::new() };
+    }
+    let (ko, at) = lang::split(p);
+    if at.starts_with("/p/") {
+        let src = shared(cfg, at[3:]) ?? { return not_found_in(cfg, p, ko); };
+        let x = shared_page(cfg, src, at, ko) ?? { return not_found_in(cfg, p, ko); };
+        return cached(x, true, r);
+    }
+    if ko {
+        if at != "/" { return not_found_in(cfg, p, true); }
+        let x = page_in(cfg, "static/index.html", "/", true) ?? { return not_found_in(cfg, p, true); };
+        return cached(x, true, r);
+    }
+    if let x: Resp = asset(cfg, p) { return cached(x, x.headers[0].starts_with("Content-Type: text/html"), r); }
+    not_found(cfg, p)
+}
+
+/// For uptime checks and the operator: `ok`, then the compile slots in
+/// use, the requests waiting for one, the cached modules, the share
+/// links, the toolchain and whether programs can run (nabi.mjs). It
+/// runs no compile; a probe that wants one POSTs to /api/compile
+/// (scripts/probe.sh).
+fn health(cfg: Cfg) -> Resp {
+    let cached = 0i64;
+    // no cache directory yet: nothing compiled so far
+    if let d: fs::ReadDir = try? fs::read_dir(cfg.work + "/cache") {
+        for _ in d.results() { cached += 1i64; }
+    }
+    let run = !cfg.mjs.is_empty() && fs::exists(cfg.mjs);
+    let packages = if cfg.deps.is_empty() { "none" } else { cfg.packages };
+    let body = f"ok\njobs {JOBS.load()}/{cfg.jobs}\nwaiting {WAITING.load()}\ncached {cached}\nshares {SHARES.load()}\nconnections {ACTIVE.load()}\nnabic {cfg.release}\nrun {run}\npackages {packages}\n";
+    text(if run { 200 } else { 503 }, body)
+}
+
+/// 404: the page with the site's chrome, or plain text under /api/.
+fn not_found(cfg: Cfg, p: str) -> Resp { not_found_in(cfg, p, false) }
+
+fn not_found_in(cfg: Cfg, p: str, ko: bool) -> Resp {
+    if !p.starts_with("/api/") {
+        if let x: Resp = page_in(cfg, "static/404.html", "/", ko) {
+            x.status = 404;
+            return x;
+        }
+    }
+    text(404, "Not found.")
+}
+
+fn handle(s: TcpStream, cfg: Cfg) {
+    let t0 = Instant::now();
+    let r = try http::read_request(s, MAX_SOURCE, Duration::secs(10)) catch e {
+        try http::send(s, e.status, ["Content-Type: text/plain; charset=utf-8"], e.msg + "\n", false) catch _ {};
+        try s.close() catch _ {};
+        return;
+    };
+    let resp = route(cfg, s, r);
+    // http::send writes a 304 without a body or Content-Length.
+    try http::send(s, resp.status, resp.headers, resp.body, r.method == "HEAD") catch _ {};
+    try s.close() catch _ {};
+    eprintln(f"{r.method} {r.path} {resp.status} {resp.body.len()}B {t0.elapsed().as_ms()}ms");
+}
+
+fn main() throws {
+    let cfg = try load_cfg();
+    // Without a sandbox a program could read the server's files at
+    // compile time: only this machine may ask then.
+    if cfg.wrap.is_empty() && !cfg.addr.starts_with("127.0.0.1:") && !cfg.addr.starts_with("[::1]:") && !cfg.addr.starts_with("localhost:") {
+        eprintln(f"error: PLAY_ADDR={cfg.addr} is reachable from other machines, so PLAY_WRAP must name a sandbox (scripts/sandbox.sh, see README.md)");
+        process::exit(2);
+    }
+    try fs::create_dir_all(cfg.work + "/jobs");
+    // Without a writable share directory, Share falls back to #code links.
+    try fs::create_dir_all(cfg.shares) catch e { eprintln(f"note: share links off: {cfg.shares}: {e}"); };
+    SHARES.store(count_shares(cfg.shares));
+    if cfg.mjs.is_empty() || !fs::exists(cfg.mjs) {
+        eprintln(f"note: no nabi.mjs (PLAY_MJS): pages cannot run programs");
+    }
+    using l = try net::tcp_listen(cfg.addr) {
+        eprintln(f"playground on http://{cfg.addr}, compiling with {cfg.nabic} ({cfg.jobs} at a time, {cfg.timeout} s each)");
+        for c in l.incoming().results() {
+            let s = try c.get() catch e {
+                eprintln(f"accept: {e}");
+                continue;
+            };
+            if ACTIVE.fetch_add(1i64) >= MAX_CONNS {
+                ACTIVE.fetch_sub(1i64);
+                try http::send(s, 503, ["Content-Type: text/plain; charset=utf-8"], "busy\n", false) catch _ {};
+                try s.close() catch _ {};
+                continue;
+            }
+            let t = thread::spawn(|| {
+                handle(s, cfg);
+                ACTIVE.fetch_sub(1i64);
+                0
+            });
+            t.detach();
+        }
+    }
+}
+
+#[cfg(test)]
+fn expect(ok: bool, what: str) {
+    if !ok { panic(what); }
+}
+
+#[cfg(test)]
+fn body_of(r: Resp) -> str { try str::from_utf8(r.body[0:r.body.len()]) catch _ { "" } }
+
+/// A failed compile answers 200 with the diagnostics and their header;
+/// a 4xx would log a failed request in every visitor's console.
+#[test]
+fn compile_errors_are_answers() {
+    let work = f"{env::temp_dir()}/nabi-playground-test-{std::process::id()}";
+    try fs::create_dir_all(work + "/jobs") catch e { panic(f"{e}"); };
+    // A stand-in nabic, run by the wrap command so it needs no exec bit.
+    try fs::write(work + "/nabic.sh", "echo 'error: boom' >&2\nexit 1\n") catch e { panic(f"{e}"); };
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: work + "/nabic.sh", nabi: work + "/nabic.sh", site: "", mjs: "", wrap: "/bin/sh", work: work, jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: work + "/shares", share_rate: 10, share_max: 2, og: "0123456789", release: "9.9.9" };
+    let r = compile(cfg, "fn main() {}\n", "0");
+    try fs::remove_dir_all(work) catch _ {};
+    expect(r.status == 200, "status");
+    expect(r.headers.contains("X-Nabi-Diagnostics: 1"), "header");
+    expect(body_of(r).contains("error: boom"), "body");
+
+    let no = diagnostics(refused("const S: str = include_str!(\"/etc/passwd\");") ?? "");
+    expect(no.status == 200 && no.headers.contains("X-Nabi-Diagnostics: 1"), "refused");
+    expect(body_of(no).contains("include_str!"), "refused body");
+    expect(text(429, "slow down").headers.len() == 2, "real errors keep their status, no header");
+
+    let page = page_resp(cfg, "static/index.html") ?? panic("no index.html");
+    expect(body_of(page).contains("og.png?v=0123456789") && !body_of(page).contains("v=dev"), "og version in page");
+    expect(body_of(page).contains("nabi 9.9.9 → wasm32") && !body_of(page).contains("nabi dev"), "toolchain release in page");
+    expect(!body_of(page).contains("<!--web:"), "shared markup filled in");
+    expect(body_of(page).contains("data-theme-set=\"dark\"") && body_of(page).contains("<a href=\"/\" aria-current=\"page\">Playground</a>"), "footer");
+    let css = kit_resp("/nabi.css") ?? panic("no /nabi.css");
+    expect(css.headers[0] == "Content-Type: text/css; charset=utf-8" && css.body.len() > 0, "kit file");
+    expect(kit_resp("/theme.js") is Resp && kit_resp("/play.js") is none, "kit names only");
+    expect(body_of(page).contains("class=\"seg\"") && body_of(page).contains("class=\"social\""), "menu");
+    expect(body_of(page).contains("<nav class=\"nav sites\"") && body_of(page).contains("<span>MIT OR Apache-2.0</span> · <span>© 2026"), "header sites, credits");
+
+    let lost = not_found(cfg, "/nope");
+    expect(lost.status == 404 && body_of(lost).contains("Back to the playground") && body_of(lost).contains("<div class=\"lost\">") && !body_of(lost).contains("<!--web:"), "404 page");
+    expect(not_found(cfg, "/api/nope").status == 404 && body_of(not_found(cfg, "/api/nope")) == "Not found.", "404 api");
+    expect(body_of(page).contains("<h1 class=\"sr-only\">Nabi Playground</h1>"), "h1");
+}
+
+/// Files carry an ETag and answer 304 for it; a file asked for by its
+/// current ?v= is cached for good, a page for minutes, the rest revalidated.
+#[test]
+fn caching() {
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: "", wrap: "", work: "", jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "dev" };
+    // GET `target`, holding If-None-Match `inm` when not empty.
+    let get = |target: str, inm: str| {
+        let h = if inm.is_empty() { "" } else { "\r\nIf-None-Match: " + inm };
+        try http::parse_head(f"GET {target} HTTP/1.1\r\nHost: a{h}") catch e { panic(e.msg) }
+    };
+    let page = page_resp(cfg, "static/index.html") ?? panic("no index.html");
+    let js = asset(cfg, "/play.js") ?? panic("no play.js");
+    let v = http::version(js.body);
+    expect(body_of(page).contains(f"src=\"/play.js?v={v}\""), "stamped play.js");
+    expect(!body_of(page).contains("href=\"/nabi.css\"") && !body_of(page).contains("href=\"/play.css\"") && !body_of(page).contains("src=\"/theme.js\""), "stamped css, theme.js");
+    let c = cached(asset(cfg, "/play.js") ?? panic("js"), false, get(f"/play.js?v={v}", ""));
+    expect(c.status == 200 && c.headers.contains("Cache-Control: public, max-age=31536000, immutable"), "immutable");
+    let etag = c.headers[c.headers.len() - 1];
+    expect(etag.starts_with("ETag: \"") && etag.len() == 24, "etag");
+    let stale = cached(asset(cfg, "/play.js") ?? panic("js"), false, get("/play.js?v=0000000000", ""));
+    expect(stale.headers.contains("Cache-Control: no-cache"), "stale version revalidates");
+    let p = cached(page, true, get("/", ""));
+    expect(p.headers.contains("Cache-Control: public, max-age=300"), "page");
+    let tag = etag["ETag: ".len():];
+    let again = cached(asset(cfg, "/play.js") ?? panic("js"), false, get("/play.js", "W/" + tag + ", \"x\""));
+    expect(again.status == 304 && again.body.len() == 0 && again.headers.contains("ETag: " + tag), "304");
+    expect(cached(asset(cfg, "/play.js") ?? panic("js"), false, get("/play.js", "\"nope\"")).status == 200, "other etag");
+    let font = asset(cfg, "/fonts/Geist-Variable.woff2") ?? panic("no font");
+    expect(font.headers[0] == "Content-Type: font/woff2", "font type");
+    expect(cached(font, false, get("/fonts/Geist-Variable.woff2", "")).headers.contains("Cache-Control: public, max-age=86400"), "font cache");
+    expect((asset(cfg, "/fonts/pretendard.css") ?? panic("no pretendard.css")).headers[0] == "Content-Type: text/css; charset=utf-8", "pretendard.css");
+    expect(asset(cfg, "/fonts/README.md") is none && asset(cfg, "/fonts/../nabi/nabi.nabion") is none, "fonts only");
+    expect(body_of(page).contains("<link rel=\"preload\" href=\"/fonts/Geist-Variable.woff2\"") && !body_of(page).contains("googleapis") && !body_of(page).contains("jsdelivr"), "own fonts");
+}
+
+/// Share links: content-addressed, never rewritten, strict ids, a cap.
+#[test]
+fn share_links() {
+    let work = f"{env::temp_dir()}/nabi-playground-share-{std::process::id()}";
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: "", wrap: "", work: work, jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: work + "/shares", share_rate: 10, share_max: 2, og: "dev", release: "dev" };
+    SHARES.store(0i64);
+    let a = share(cfg, "fn main() {}\n");
+    let id = body_of(a);
+    expect(a.status == 200 && valid_id(id) && id == share_id("fn main() {}\n"), "stored");
+    expect(body_of(share(cfg, "fn main() {}\n")) == id && SHARES.load() == 1i64, "same code, same id, one file");
+    expect((shared(cfg, id) ?? "") == "fn main() {}\n", "read back");
+    expect(shared(cfg, "../shares/" + id) is none && shared(cfg, id + "x") is none && shared(cfg, "ABCDEFGHIJ") is none && shared(cfg, "abcdefgh1j") is none, "bad ids");
+    expect(shared(cfg, "aaaaaaaaaa") is none, "unknown id");
+    let x = shared_page(cfg, "</pre><script>alert(1)</script>", "/p/" + id, false) ?? panic("page");
+    expect(body_of(x).contains("<pre id=\"shared\" hidden>\n&lt;/pre&gt;&lt;script&gt;") && body_of(x).contains("noindex"), "escaped in the page");
+    // A different code under an existing id is refused, not overwritten.
+    try fs::write(cfg.shares + "/" + share_id("x") + ".nabi", "y") catch e { panic(f"{e}"); };
+    expect(share(cfg, "x").status == 409 && (shared(cfg, share_id("x")) ?? "") == "y", "collision");
+    expect(share(cfg, "fn other() {}\n").status == 200 && share(cfg, "fn third() {}\n").status == 503, "cap");
+    expect(count_shares(cfg.shares) == 3i64, "count");
+    try fs::remove_dir_all(work) catch _ {};
+}
+
+/// A compile past its time is stopped, and so is its sandbox: the wrap
+/// command gets `--kill` in the job directory.
+#[test]
+fn timeouts_stop_the_sandbox() {
+    let work = f"{env::temp_dir()}/nabi-playground-kill-{std::process::id()}";
+    try fs::create_dir_all(work + "/jobs") catch e { panic(f"{e}"); };
+    try fs::write(work + "/wrap.sh", f"if [ \"$1\" = --kill ]; then echo \"$PLAY_LIMIT\" > {work}/killed; exit 0; fi\nexec /bin/sh \"$@\"\n") catch e { panic(f"{e}"); };
+    try fs::write(work + "/slow.sh", "sleep 5\n") catch e { panic(f"{e}"); };
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: work + "/slow.sh", nabi: "", site: "", mjs: "", wrap: "/bin/sh " + work + "/wrap.sh", work: work, jobs: 1, timeout: 1u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "dev" };
+    let r = compile(cfg, "fn main() {}\n", "0");
+    let killed = try fs::read_to_str(work + "/killed") catch _ { "" };
+    try fs::remove_dir_all(work) catch _ {};
+    expect(r.status == 504, f"status {r.status}");
+    expect(killed.trim() == "1", f"wrap --kill ran with the limit: `{killed}`");
+}
+
+/// Packages: nabic gets the prebuilt ones only for a program that names
+/// one, all of them in order, for the build's level.
+#[test]
+fn package_externs() {
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: "", wrap: "", work: "", jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "dev", deps: "/d", packages: "linalg, spec=special,stats,plot" };
+    expect(externs(cfg, "fn main() {}\n", "0").is_empty(), "a plain program");
+    let x = externs(cfg, "fn main() { println(stats::mean([1.0])); }\n", "2");
+    expect(x.join(" ") == "--extern linalg=/d/release/deps/linalg.nabihir --extern spec=/d/release/deps/special.nabihir --extern stats=/d/release/deps/stats.nabihir --extern plot=/d/release/deps/plot.nabihir", x.join(" "));
+    expect(externs(cfg, "use plot;\n", "0")[1] == "linalg=/d/debug/deps/linalg.nabihir", "debug");
+    cfg.deps = "";
+    expect(externs(cfg, "use plot;\n", "0").is_empty(), "no PLAY_DEPS");
+}
+
+/// Format answers the file `nabi fmt` left, or its diagnostics.
+#[test]
+fn format_answers() {
+    let work = f"{env::temp_dir()}/nabi-playground-fmt-{std::process::id()}";
+    try fs::create_dir_all(work + "/jobs") catch e { panic(f"{e}"); };
+    try fs::write(work + "/ok.sh", "printf 'fn main() {\\n    f();\\n}\\n' > main.nabi\n") catch e { panic(f"{e}"); };
+    try fs::write(work + "/bad.sh", "echo 'error[E001]: <fmt>:2:1: unterminated string literal' >&2\nexit 1\n") catch e { panic(f"{e}"); };
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: work + "/ok.sh", site: "", mjs: "", wrap: "/bin/sh", work: work, jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: work + "/shares", share_rate: 10, share_max: 2, og: "dev", release: "dev" };
+    let ok = format(cfg, "fn main() {\nf();\n}\n");
+    cfg.nabi = work + "/bad.sh";
+    let bad = format(cfg, "fn main() {\n\"\n");
+    try fs::remove_dir_all(work) catch _ {};
+    expect(ok.status == 200 && !ok.headers.contains("X-Nabi-Diagnostics: 1") && body_of(ok) == "fn main() {\n    f();\n}\n", "formatted");
+    expect(bad.status == 200 && bad.headers.contains("X-Nabi-Diagnostics: 1") && body_of(bad).contains("main.nabi:2:1"), "fmt diagnostics");
+}
+
+/// Only code is refused: a comment or a string naming include_str! is
+/// a program like any other.
+#[test]
+fn refusals_read_code_only() {
+    expect(refused("fn main() { let s = include_str!(\"/etc/passwd\"); }") is str, "call");
+    expect(refused("fn main() { let s = include_bytes ! (\"x\"); }") is str, "spaced");
+    expect(refused("#[path = \"/etc\"]\nmod m;") is str && refused("# [ path = \"x\" ]\nmod m;") is str, "path");
+    expect(refused("use wit :: import;") is str, "wit");
+    expect(refused("// include_str! is refused here\nfn main() {}\n") is none, "line comment");
+    expect(refused("/* include_bytes /* nested */ #[path */ fn main() {}") is none, "block comment");
+    expect(refused("fn main() { println(\"no include_str here\"); }") is none, "string");
+    expect(refused("fn main() { println(r#\"include_str \"quoted\" #[path\"#); }") is none, "raw string");
+    expect(refused("fn main() { let c = '\"'; let s = \"include_str\"; }") is none, "char quote");
+    expect(refused("fn main() { println(f\"{include_str!(\"x\")}\"); }") is str, "f-string code");
+    expect(refused("fn main() { let my_include_str = 1; }") is none, "longer identifier");
+}
+
+/// The module cache drops its least recently used quarter when full.
+#[test]
+fn cache_evicts_least_recent() {
+    let dir = f"{env::temp_dir()}/nabi-playground-lru-{std::process::id()}";
+    try fs::create_dir_all(dir) catch e { panic(f"{e}"); };
+    for k in 0..8 {
+        try fs::write(f"{dir}/{k}.wasm", "x") catch e { panic(f"{e}"); };
+        thread::sleep(Duration::ms(15));
+    }
+    // 0 is used again: newest now.
+    try fs::write(f"{dir}/0.wasm", "x") catch e { panic(f"{e}"); };
+    make_room(dir, 8);
+    let left = fs::exists(f"{dir}/0.wasm") && !fs::exists(f"{dir}/1.wasm") && !fs::exists(f"{dir}/2.wasm") && fs::exists(f"{dir}/3.wasm");
+    make_room(dir, 8);
+    let n = 0usize;
+    for _ in (try fs::read_dir(dir) catch e { panic(f"{e}"); }).results() { n += 1; }
+    try fs::remove_dir_all(dir) catch _ {};
+    expect(left, "the oldest two went (8 - 8 + 8 / 4), the reused one stayed");
+    expect(n == 6, f"under the limit nothing goes: {n}");
+}
+
+/// /ko is the page in Korean: its chrome, its switch back, its 404.
+#[test]
+fn korean_pages() {
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: "", wrap: "", work: "", jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "dev", deps: "/d", packages: "json,spec=special,stats" };
+    let en = body_of(page_resp(cfg, "static/index.html") ?? panic("en"));
+    let ko = body_of(page_in(cfg, "static/index.html", "/", true) ?? panic("ko"));
+    expect(en.contains("<html lang=\"en\"") && en.contains("href=\"/ko\" hreflang=\"ko\"") && en.contains("Official packages are ready to use: <a href=\"https://packages.nabi-lang.org/packages/json\">json</a>, <a href=\"https://packages.nabi-lang.org/packages/stats\">stats</a>."), "en page");
+    expect(ko.contains("<html lang=\"ko\"") && ko.contains(">공유<") && ko.contains("<a href=\"/\" hreflang=\"en\"") && ko.contains("플레이그라운드</a>") && ko.contains("pretendard"), "ko page");
+    expect(ko.contains("<link rel=\"canonical\" href=\"https://playground.nabi-lang.org/ko\">") && ko.contains("hreflang=\"en\" href=\"https://playground.nabi-lang.org/\""), "ko addresses");
+    let p = body_of(page_in(cfg, "static/index.html", "/p/abcdefghij", true) ?? panic("ko p"));
+    expect(p.contains("href=\"/p/abcdefghij\" hreflang=\"en\""), "a share's switch");
+    let lost = not_found_in(cfg, "/ko/nope", true);
+    expect(lost.status == 404 && body_of(lost).contains("플레이그라운드로 돌아가기") && body_of(lost).contains("<html lang=\"ko\""), "ko 404");
+    cfg.deps = "";
+    expect(!body_of(page_resp(cfg, "static/index.html") ?? panic("en")).contains("Official packages"), "no packages, no list");
+}
+
+/// /api/health says ok and the state, without compiling.
+#[test]
+fn health_answers() {
+    let work = f"{env::temp_dir()}/nabi-playground-health-{std::process::id()}";
+    try fs::create_dir_all(work + "/cache") catch e { panic(f"{e}"); };
+    try fs::write(work + "/nabi.mjs", "") catch e { panic(f"{e}"); };
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: work + "/nabi.mjs", wrap: "", work: work, jobs: 3, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "9.9.9" };
+    let ok = health(cfg);
+    cfg.mjs = "";
+    let no = health(cfg);
+    try fs::remove_dir_all(work) catch _ {};
+    expect(ok.status == 200 && body_of(ok).starts_with("ok\n") && body_of(ok).contains("jobs 0/3") && body_of(ok).contains("nabic 9.9.9") && body_of(ok).contains("packages none"), body_of(ok));
+    expect(no.status == 503 && body_of(no).contains("run false"), "no runner");
+}

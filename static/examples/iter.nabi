@@ -1,0 +1,13 @@
+// Lists, closures and iterators.
+
+fn main() {
+    let xs = [5, 3, 8, 1, 9, 2];
+    let evens = xs.filter(|x| x % 2 == 0).to_list();
+    let total = xs.fold(0, |acc, x| acc + x);
+    println(f"evens: {evens:?}");
+    println(f"sum: {total}");
+
+    let words = ["sum", "types", "are", "fun"];
+    let lens = words.map(|w| w.len()).to_list();
+    println(f"lengths: {lens:?}");
+}

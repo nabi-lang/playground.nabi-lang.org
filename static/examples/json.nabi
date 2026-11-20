@@ -1,0 +1,20 @@
+// JSON with the `json` package: parse text into a tree and read it by
+// JSON Pointer, then turn a type of your own into JSON and back.
+#[derive(json::Json, Debug)]
+struct Station {
+    name: str;
+    temps: List<f64>;
+}
+
+fn main() throws {
+    let v = try json::parse("{\"city\": \"Seoul\", \"days\": [{\"high\": 18.5}, {\"high\": 21}]}");
+    println(v.get("city")?.as_str() ?? "?");
+    println(f"day 2 high: {v.pointer("/days/1/high")?.as_f64() ?? 0.0}");
+
+    let s = Station { name: "Gwanak", temps: [12.5, 14.0, 13.25] };
+    let text = json::to_str(s);
+    println(text);
+    let back: Station = try json::from_str(text);
+    println(f"{back:?}");
+    println(json::to_pretty(back));
+}

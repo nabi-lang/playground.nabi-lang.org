@@ -1,0 +1,12 @@
+// A plot in the page: `display` shows a value by its picture, here the
+// SVG the `plot` package draws.
+fn main() {
+    let t = plot::linspace(0.0, 10.0, 200);
+    let y: List<f64> = t.iter().map(|v| (-v / 4.0).exp() * (2.0 * v).sin()).collect();
+    let ax = plot::axes()
+        .line(t, y).label("x(t)")
+        .hline(0.0).dash(plot::Dash::Dotted)
+        .xlabel("time [s]").ylabel("displacement [mm]")
+        .title("Damped oscillation");
+    display(ax);
+}

@@ -1,0 +1,74 @@
+# Build and test the compile server on every push.
+name: CI / Build and test the server
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    name: DCO
+    uses: nabi-lang/.github/.github/workflows/reusable-dco.yml@v1.0.0
+
+  build:
+    name: Build and test
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the repository with submodules
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      # The page scripts are TypeScript: type-check them, then write the
+      # .js the server serves.
+      - name: Install Node.js 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+      - name: Type-check and build the page scripts
+        run: |
+          npm install --no-save --no-audit --no-fund
+          npm run check
+          npm run build
+
+      - name: Install Nabi from the nabi.nabion pin
+        uses: nabi-lang/.github/actions/install-nabi@v1.0.0
+        with:
+          pin: nabi.nabion
+
+      - name: Build with nabi build
+        run: nabi build --release
+
+      - name: Run nabi test
+        run: nabi test
+
+  # The one required check (rulesets/main.json): passes when every job
+  # passed or was skipped.
+  ci-gate:
+    name: CI gate
+    needs: [dco, build]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check the job results
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "results: $RESULTS"
+          for r in $RESULTS; do
+            case $r in
+              success | skipped) ;;
+              *)
+                echo "::error::a gate job did not pass: $r"
+                exit 1
+                ;;
+            esac
+          done

@@ -1,0 +1,18 @@
+# A push to release ships playground.nabi-lang.org.
+# Deploys run in nabi-lang/infra; nothing about them lives here.
+name: Deploy / playground.nabi-lang.org
+
+on:
+  push:
+    branches: [release]
+
+permissions: {}
+
+jobs:
+  deploy:
+    name: Deploy
+    uses: nabi-lang/.github/.github/workflows/reusable-deploy.yml@v1.0.0
+    with:
+      site: playground
+    secrets:
+      GH_DISPATCH_TOKEN_INFRA: ${{ secrets.GH_DISPATCH_TOKEN_INFRA }}

@@ -1,0 +1,11 @@
+// Welcome to the Nabi Playground!
+// Edit the code and press Run
+// (Ctrl+Enter, or Cmd+Enter).
+
+fn main() {
+    let name = "nabi";
+    println(f"Hello, {name}!");
+    for i in 1..=3 {
+        println(f"{i} * {i} = {i * i}");
+    }
+}
