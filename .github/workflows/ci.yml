@@ -14,7 +14,7 @@ permissions:
 jobs:
   dco:
     name: DCO
-    uses: nabi-lang/.github/.github/workflows/reusable-dco.yml@v1.0.2
+    uses: nabi-lang/.github/.github/workflows/reusable-dco.yml@v1.0.3
 
   build:
     name: Build and test
@@ -39,7 +39,7 @@ jobs:
           npm run build
 
       - name: Install Nabi from the nabi.nabion pin
-        uses: nabi-lang/.github/actions/install-nabi@v1.0.2
+        uses: nabi-lang/.github/actions/install-nabi@v1.0.3
         with:
           pin: nabi.nabion
 
