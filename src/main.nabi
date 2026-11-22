@@ -672,8 +672,10 @@ fn run_tool(cfg: Cfg, prog: str, dir: str, args: List<str>, secs: u64, what: str
 
 /// `cmd` with a clean environment: no NABI_* / NABIC_* settings reach the
 /// tool, its home and caches are the job's own directory. The sandbox's
-/// own settings (PLAY_IMAGE, PLAY_MEM, PLAY_CPUS, DOCKER_HOST) and
-/// PLAY_DEPS (bwrap binds it) pass through to the wrap command, and
+/// own settings (PLAY_IMAGE, PLAY_MEM, PLAY_CPUS, PLAY_PIDS, DOCKER_HOST,
+/// and the user manager's XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS
+/// for sandbox.sh's systemd-run) and PLAY_DEPS (bwrap binds it) pass
+/// through to the wrap command, and
 /// PLAY_LIMIT tells it the time limit;
 /// scripts/sandbox.sh clears them before the tool runs.
 fn sandboxed(cmd: Command, dir: str, secs: u64) -> Command {
@@ -681,7 +683,7 @@ fn sandboxed(cmd: Command, dir: str, secs: u64) -> Command {
         .env("PATH", "/usr/bin:/bin").env("HOME", dir).env("TMPDIR", dir).env("NABI_HOME", dir + "/.nabi")
         .env("XDG_CACHE_HOME", dir + "/.cache").env("NO_COLOR", "1").env("NABI_INCREMENTAL", "0")
         .env("PLAY_LIMIT", f"{secs}");
-    for k in ["PLAY_IMAGE", "PLAY_MEM", "PLAY_CPUS", "DOCKER_HOST", "PLAY_DEPS"] {
+    for k in ["PLAY_IMAGE", "PLAY_MEM", "PLAY_CPUS", "PLAY_PIDS", "DOCKER_HOST", "PLAY_DEPS", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"] {
         let v = try env::var(k) catch _ { "" };
         if !v.is_empty() { c = c.env(k, v); }
     }

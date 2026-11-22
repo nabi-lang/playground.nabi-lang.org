@@ -4,7 +4,8 @@
 #
 #   sandbox.sh <toolchain>/bin/nabic|nabi <args..>  (run in the job directory)
 #   sandbox.sh --kill   (a no-op: --die-with-parent ends the sandbox with it)
-#   sandbox.sh --check  (bwrap and prlimit are there and bwrap can run)
+#   sandbox.sh --check  (bwrap and prlimit are there and bwrap can run;
+#                        with a user manager, systemd-run can make a scope)
 #
 # nabic can read any file it can reach at compile time (include_bytes!,
 # #[path], WIT) and put it in the module it writes, so it sees only the
@@ -12,9 +13,18 @@
 # (PLAY_DEPS, when set) and /usr (read-only), a fresh
 # /proc and a /dev with only null: no /etc, no home directories, no
 # network, no other processes. Limits: 16 GiB of address space (nabic
-# reserves a 1 GiB stack and its codegen threads; cap real memory with a
-# cgroup), 60 s of CPU, 64 MiB per file written; the server's
-# PLAY_TIMEOUT kills it before that.
+# reserves a 1 GiB stack and its codegen threads), 60 s of CPU, 64 MiB
+# per file written; the server's PLAY_TIMEOUT kills it before that.
+#
+# Real memory and the process count need a cgroup. With a systemd user
+# manager (the service user has lingering on, and the server passes its
+# XDG_RUNTIME_DIR / DBUS_SESSION_BUS_ADDRESS through), each run gets its
+# own transient scope: `systemd-run --user --scope` with MemoryMax
+# (PLAY_MEM, default 4G; swap off) and TasksMax (PLAY_PIDS, default 128),
+# so a run past its memory is OOM-killed alone. Without one, only the
+# prlimit caps hold, and the service itself needs MemoryMax= and
+# TasksMax= in its unit. PLAY_SCOPE=off skips the scope.
+#
 # Needs bubblewrap and util-linux's prlimit. PLAY_NABIC must be the
 # toolchain's own nabic (not the ~/.nabi/bin proxy), so its lib/ is bound;
 # the nabi beside it runs `fmt`. The toolchain is bound read-only, so warm
@@ -25,12 +35,26 @@ set -eu
 # Mounts go in order: /tmp's tmpfs first, then the job directory (often
 # under /tmp) on top of it.
 
+mem=$(printf '%s' "${PLAY_MEM:-4G}" | tr 'kmgt' 'KMGT')
+pids=${PLAY_PIDS:-128}
+
+# Whether this user has a systemd manager to make scopes in.
+has_scope() {
+  [ "${PLAY_SCOPE:-auto}" != off ] || return 1
+  command -v systemd-run >/dev/null || return 1
+  [ -n "${XDG_RUNTIME_DIR:-}" ] && [ -S "$XDG_RUNTIME_DIR/bus" ] || [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ]
+}
+
 [ "${1-}" = --kill ] && exit 0
 if [ "${1-}" = --check ]; then
   for t in bwrap prlimit; do
     command -v $t >/dev/null || { echo "no $t" >&2; exit 1; }
   done
   bwrap --unshare-all --ro-bind / / -- /bin/true 2>/dev/null || { echo "bwrap cannot make a sandbox" >&2; exit 1; }
+  if has_scope; then
+    systemd-run --user --scope --quiet --collect -p MemoryMax="$mem" -p TasksMax="$pids" -- /bin/true 2>/dev/null ||
+      { echo "systemd-run cannot make a scope; set PLAY_SCOPE=off, or enable lingering for this user" >&2; exit 1; }
+  fi
   exit 0
 fi
 [ $# -ge 1 ] || { echo "usage: sandbox.sh <toolchain>/bin/nabic|nabi <args..>" >&2; exit 2; }
@@ -45,7 +69,7 @@ job=$(pwd)
 deps=${PLAY_DEPS:-}
 [ -z "$deps" ] || [ -d "$deps" ] || { echo "sandbox.sh: PLAY_DEPS=$deps is not a directory" >&2; exit 2; }
 
-exec prlimit --as=17179869184 --cpu=60 --fsize=67108864 --core=0 -- \
+set -- prlimit --as=17179869184 --cpu=60 --fsize=67108864 --core=0 -- \
   bwrap --unshare-all --die-with-parent --new-session --clearenv \
     --setenv PATH /usr/bin:/bin --setenv HOME "$job" --setenv TMPDIR "$job" \
     --setenv NO_COLOR 1 --setenv NABI_INCREMENTAL 0 \
@@ -56,3 +80,8 @@ exec prlimit --as=17179869184 --cpu=60 --fsize=67108864 --core=0 -- \
     ${deps:+--ro-bind "$deps" "$deps"} \
     --bind "$job" "$job" --chdir "$job" \
     -- "$root/bin/$tool" "$@"
+if has_scope; then
+  exec systemd-run --user --scope --quiet --collect \
+    -p MemoryMax="$mem" -p MemorySwapMax=0 -p TasksMax="$pids" -- "$@"
+fi
+exec "$@"

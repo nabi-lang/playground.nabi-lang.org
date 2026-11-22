@@ -99,9 +99,9 @@ docker build -t nabi-playground:current \
 docker run --rm --entrypoint cat nabi-playground:current /opt/nabi-play/target/wasm32-unknown-unknown/packages
 ```
 
-Run the server with `PLAY_DEPS=/opt/nabi-play/target/wasm32-unknown-unknown` and `PLAY_PACKAGES` set to the list the last command prints (the server cannot read the image's file). Tune with `PLAY_IMAGE`, `PLAY_MEM` (default `4g`), `PLAY_CPUS` (default `2`); the service user must run `docker`. Put a TLS reverse proxy in front and set `PLAY_CLIENT_HEADER` to the header it adds, or every client shares the proxy's rate limit.
+Run the server with `PLAY_DEPS=/opt/nabi-play/target/wasm32-unknown-unknown` and `PLAY_PACKAGES` set to the list the last command prints (the server cannot read the image's file). Tune with `PLAY_IMAGE`, `PLAY_MEM` (default `4g`), `PLAY_CPUS` (default `2`), `PLAY_PIDS` (default `128`); the service user must run `docker`. Put a TLS reverse proxy in front and set `PLAY_CLIENT_HEADER` to the header it adds, or every client shares the proxy's rate limit.
 
-- bubblewrap (lighter, no daemon): `scripts/sandbox.sh` runs each compile under bwrap with only the job directory writable, no network, and prlimit caps. Real memory still needs a cgroup cap, so run the service with `MemoryMax=6G`. Run `scripts/warm.sh <toolchain> <out>` before the service starts, and point `PLAY_DEPS` at `<out>/wasm32-unknown-unknown`, which `sandbox.sh` binds read-only beside the toolchain.
+- bubblewrap (lighter, no daemon): `scripts/sandbox.sh` runs each compile under bwrap with only the job directory writable, no network, and prlimit caps (address space, CPU time, file size). Real memory and the process count need a cgroup: when the service user has a systemd user manager (`loginctl enable-linger <user>`, and the unit sets `XDG_RUNTIME_DIR=/run/user/<uid>`, which the server passes to the script), each run gets its own transient scope, `systemd-run --user --scope -p MemoryMax=$PLAY_MEM -p MemorySwapMax=0 -p TasksMax=$PLAY_PIDS` (defaults `4G` and `128`), so a run past its memory is killed alone; `PLAY_WRAP --check` (and so `/api/health`) fails when the manager is there but cannot make a scope. Without one, or with `PLAY_SCOPE=off`, only the prlimit caps hold: run the service with `MemoryMax=6G` and `TasksMax=` in its unit then. Run `scripts/warm.sh <toolchain> <out>` before the service starts, and point `PLAY_DEPS` at `<out>/wasm32-unknown-unknown`, which `sandbox.sh` binds read-only beside the toolchain.
 
 ## Operations
 
@@ -120,4 +120,4 @@ Run the server with `PLAY_DEPS=/opt/nabi-play/target/wasm32-unknown-unknown` and
 | `static/` | `index.html`, `404.html`, `play.tsx` and its `ui/*.tsx` components (`ui/text.ts`: the script's words in English and Korean), `run.ts` (the worker), `play.css`, `examples/*.nabi`, `og.png` |
 | `web/` | the web kit (submodule): `nabi.css`, `theme.js`, the marks and icons, and the `web` library (HTTP, addresses) |
 | `scripts/og.html` | Source of `static/og.png` |
-| `scripts/` | `Dockerfile` + `docker-sandbox.sh` (recommended), `sandbox.sh` (bubblewrap), `warm.sh` (the toolchain's cache and the prebuilt packages), `probe.sh` (an uptime probe) |
+| `scripts/` | `Dockerfile` + `docker-sandbox.sh` (recommended), `sandbox.sh` (bubblewrap, with a systemd scope when it can), `warm.sh` (the toolchain's cache and the prebuilt packages), `probe.sh` (an uptime probe) |

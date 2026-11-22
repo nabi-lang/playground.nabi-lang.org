@@ -16,7 +16,8 @@
 # the server runs `--kill` after a timeout, and the tool runs under
 # `timeout` inside as well, in case the container started after that.
 # Build the image first (scripts/Dockerfile). PLAY_IMAGE, PLAY_MEM,
-# PLAY_CPUS override; PLAY_LIMIT is the server's time limit in seconds.
+# PLAY_CPUS, PLAY_PIDS (default 128) override; PLAY_LIMIT is the
+# server's time limit in seconds.
 set -eu
 
 job=$(pwd)
@@ -45,7 +46,7 @@ exec docker run --rm --name "$name" --init --stop-timeout 1 \
   --network none \
   --ipc none \
   --memory "${PLAY_MEM:-4g}" --memory-swap "${PLAY_MEM:-4g}" \
-  --cpus "$cpus" --pids-limit 128 \
+  --cpus "$cpus" --pids-limit "${PLAY_PIDS:-128}" \
   --ulimit nofile=512:512 --ulimit fsize=67108864 \
   --ulimit cpu=$((limit * ${cpus%.*} + 10)) \
   --read-only --tmpfs /tmp:size=64m \
