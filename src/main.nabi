@@ -134,6 +134,9 @@ struct Cfg {
     /// page's nabi-ts meta): the files only change with a deploy, which
     /// restarts the server, so they are hashed once.
     ts: str = "";
+    /// The examples this server cannot build, `,` joined (examples_off):
+    /// the page's nabi-examples-off meta.
+    examples_off: str = "";
 }
 
 fn setting(k: str, dflt: str) -> str {
@@ -176,7 +179,9 @@ fn load_cfg() throws -> Cfg {
     let rate = try setting("PLAY_RATE", "30").parse::<i64>();
     let share_rate = try setting("PLAY_SHARE_RATE", "10").parse::<i64>();
     let share_max = try setting("PLAY_SHARE_MAX", "100000").parse::<i64>();
-    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), share_rate: share_rate, share_max: share_max, queue: queue, deps: setting("PLAY_DEPS", ""), packages: setting("PLAY_PACKAGES", packages_of(setting("PLAY_DEPS", ""))), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic), ts: ts_versions() }
+    let deps = setting("PLAY_DEPS", "");
+    let packages = setting("PLAY_PACKAGES", packages_of(deps));
+    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), share_rate: share_rate, share_max: share_max, queue: queue, deps: deps, packages: packages, examples_off: examples_off(deps, packages), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic), ts: ts_versions() }
 }
 
 /// The packages warm.sh built into `deps` (its `packages` file, when
@@ -185,6 +190,55 @@ fn packages_of(deps: str) -> str {
     if deps.is_empty() { return PACKAGES; }
     let t = (try fs::read_to_str(deps + "/packages") catch _ { "" }).trim();
     if t.is_empty() { PACKAGES } else { t }
+}
+
+/// The aliases of a `,` joined package list (`alias=name` or `name`).
+fn package_names(list: str) -> List<str> {
+    let out: List<str> = List::new();
+    for n in list.split(",") {
+        let (alias, _) = n.split_once("=") ?? (n, n);
+        if !alias.trim().is_empty() { out.push(alias.trim()); }
+    }
+    out
+}
+
+/// Whether `code` names package `n`: `n::..` or `use n`, `n` a whole
+/// name and not a path's later part (`std::n::`).
+fn uses(code: str, n: str) -> bool {
+    let from = 0usize;
+    while let k: usize = code[from:].find(n) {
+        let at = from + k;
+        let end = at + n.len();
+        let before = if at == 0 { ' ' } else { code[:at].chars().last() ?? ' ' };
+        let rest = code[end:];
+        let whole = !is_ident(before) && before != ':' && !is_ident(rest.chars().next() ?? ' ');
+        if whole && (rest.starts_with("::") || code[:at].trim_end().ends_with("use")) { return true; }
+        from = end;
+    }
+    false
+}
+
+/// The examples (static/examples/, by name) that use a known package
+/// this server does not have, sorted and `,` joined: with `deps` empty
+/// it has none.
+fn examples_off(deps: str, packages: str) -> str {
+    let have = if deps.is_empty() { List::new() } else { package_names(packages) };
+    let known = package_names(PACKAGES + "," + packages);
+    let off: List<str> = List::new();
+    for e in (try fs::read_dir("static/examples") catch _ { return ""; }).results() {
+        let ent = try e.get() catch _ { continue; };
+        let file = ent.file_name();
+        if !file.ends_with(".nabi") { continue; }
+        let code = code_only(try fs::read_to_str("static/examples/" + file) catch _ { continue; });
+        for n in known {
+            if !have.contains(n) && uses(code, n) {
+                off.push(file[:file.len() - ".nabi".len()]);
+                break;
+            }
+        }
+    }
+    off.sort();
+    off.join(",")
 }
 
 /// The version of the og.png that `/og.png` serves from `roots`, or
@@ -822,14 +876,16 @@ fn page_in(cfg: Cfg, path: str, at: str, ko: bool) -> Resp | none {
 }
 
 /// The stylesheets and scripts a page names, as `"/x?v=<version>"`, so
-/// a browser keeps each until it changes; and the versions of the
-/// highlighting's files (highlight.ts reads them from the meta).
+/// a browser keeps each until it changes; the versions of the
+/// highlighting's files (highlight.ts reads them from the meta); and
+/// the examples the picker leaves out.
 fn stamp(cfg: Cfg, html: str) -> str {
     let out = html;
     for p in ["/nabi.css", "/play.css", "/theme.js", "/play.js"] {
         if let x: Resp = asset(cfg, p) { out = out.replace(f"\"{p}\"", f"\"{p}?v={http::version(x.body)}\""); }
     }
     out.replace("<meta name=\"nabi-ts\" content=\"\">", f"<meta name=\"nabi-ts\" content=\"{cfg.ts}\">")
+        .replace("<meta name=\"nabi-examples-off\" content=\"\">", f"<meta name=\"nabi-examples-off\" content=\"{chrome::esc(cfg.examples_off)}\">")
 }
 
 /// Cfg::ts, from static/ts/.
@@ -1293,6 +1349,19 @@ fn korean_pages() {
     expect(lost.status == 404 && body_of(lost).contains("플레이그라운드로 돌아가기") && body_of(lost).contains("<html lang=\"ko\""), "ko 404");
     cfg.deps = "";
     expect(!body_of(page_resp(cfg, "static/index.html") ?? panic("en")).contains("Official packages"), "no packages, no list");
+}
+
+/// The picker leaves out the examples whose packages are not here.
+#[test]
+fn examples_need_their_packages() {
+    expect(examples_off("/d", PACKAGES) == "", examples_off("/d", PACKAGES));
+    expect(examples_off("/d", "json,spec=special,stats") == "linalg,plot", examples_off("/d", "json,spec=special,stats"));
+    expect(examples_off("", PACKAGES) == "json,linalg,plot,stats", examples_off("", PACKAGES));
+    expect(uses("use plot;", "plot") && uses("x = stats::mean(a)", "stats") && uses("#[derive(json::Json)]", "json"), "uses");
+    expect(!uses("let plots = 1; myplot::x(); std::plot::y(); plot(1);", "plot"), "not uses");
+    expect(!uses(code_only("// table::x\nlet s = \"table::\";"), "table"), "comments and strings");
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: "", wrap: "", work: "", jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "dev", examples_off: "linalg,plot" };
+    expect(body_of(page_resp(cfg, "static/index.html") ?? panic("page")).contains("<meta name=\"nabi-examples-off\" content=\"linalg,plot\">"), "stamped");
 }
 
 /// /api/health says ok and what is there, or 503 and why in one line;

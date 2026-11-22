@@ -297,10 +297,13 @@ ed.addEventListener("keydown", (ev) => {
 // edits to an example are kept per example ("play.ex.<name>") until
 // Reset example puts it back.
 
+// An example that uses a package the server does not have is left out:
+// main.nabi names them in <meta name="nabi-examples-off">.
+const OFF = new Set((document.querySelector<HTMLMetaElement>('meta[name="nabi-examples-off"]')?.content ?? "").split(","));
 const EXAMPLES: [file: string, label: string][] = [
   "hello", "sums", "none", "errors", "iter", "structs", "input",
   "json", "stats", "linalg", "plot", "error", "try",
-].map((f) => [f, T.examples[f] ?? f]);
+].filter((f) => !OFF.has(f)).map((f) => [f, T.examples[f] ?? f]);
 // "Code from the link" joins the list once there is such code.
 let hasLink = false;
 const drawExamples = (): void => render(<Examples list={EXAMPLES} link={hasLink} />, pick);
