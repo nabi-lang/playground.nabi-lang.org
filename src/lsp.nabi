@@ -1,0 +1,329 @@
+// POST /api/lsp: one language-server request on a page's source,
+// answered by a short-lived `nabils` in the sandbox (main.nabi runs it).
+// Here: the request's JSON, the stdio session nabils reads (initialize,
+// didOpen, the request, shutdown, exit) and its answer picked out of what
+// it wrote. Only the JSON these need is read: a flat object in, one
+// framed message's `result` out, passed through as nabils wrote it.
+
+/// The requests a page may make, and their LSP methods.
+pub const REQUESTS: [(str, str); 3] = [("completion", "textDocument/completion"), ("hover", "textDocument/hover"), ("definition", "textDocument/definition")];
+
+/// The buffer's address for nabils: a fixed one, so no job directory
+/// shows in an answer, and one that names no file (nabils checks the
+/// text it was sent). Answers name it `main.nabi`.
+pub const URI: str = "file:///play/main.nabi";
+
+/// What a page asks: its source, a request of REQUESTS, and a 0-based
+/// line and UTF-16 character, as LSP counts them.
+pub struct Ask {
+    pub code: str;
+    pub request: str;
+    pub line: i64;
+    pub character: i64;
+}
+
+/// The method of `request`, or none.
+pub fn method_of(request: str) -> str | none {
+    for (r, m) in REQUESTS {
+        if r == request { return m; }
+    }
+    none
+}
+
+/// `body` as an Ask, or what is wrong with it, said so a client knows
+/// what to send.
+pub fn parse_ask(body: str) -> Ask | str {
+    let want = "send a JSON object {\"code\": str, \"request\": \"completion\" | \"hover\" | \"definition\", \"line\": n, \"character\": n}";
+    let code: str | none = none;
+    let request = "";
+    let line = -1i64;
+    let character = -1i64;
+    let i = skip_ws(body, 0usize);
+    if i >= body.len() || body.byte(i) != 123u8 { return want; }
+    i = skip_ws(body, i + 1);
+    if i < body.len() && body.byte(i) == 125u8 { return want; }
+    loop {
+        let (key, after) = read_string(body, i) ?? { return want; };
+        i = skip_ws(body, after);
+        if i >= body.len() || body.byte(i) != 58u8 { return want; }
+        i = skip_ws(body, i + 1);
+        if key == "code" || key == "request" {
+            let (v, end) = read_string(body, i) ?? { return f"`{key}` must be a string; {want}"; };
+            if key == "code" { code = v; } else { request = v; }
+            i = end;
+        } else if key == "line" || key == "character" {
+            let (n, end) = read_count(body, i) ?? { return f"`{key}` must be a whole number from 0; {want}"; };
+            if key == "line" { line = n; } else { character = n; }
+            i = end;
+        } else {
+            i = skip_value(body, i) ?? { return want; };
+        }
+        i = skip_ws(body, i);
+        if i >= body.len() { return want; }
+        if body.byte(i) == 125u8 { break; }
+        if body.byte(i) != 44u8 { return want; }
+        i = skip_ws(body, i + 1);
+    }
+    if !(skip_ws(body, i + 1) == body.len()) { return want; }
+    let c = code ?? { return f"no `code`; {want}"; };
+    if method_of(request) is none { return f"unknown request `{request}`; {want}"; }
+    if line < 0i64 || character < 0i64 { return f"no `line` or `character`; {want}"; }
+    Ask { code: c, request: request, line: line, character: character }
+}
+
+/// What nabils reads on stdin for `a`: the whole session, ending in
+/// `exit`, so it stops as soon as it has answered.
+pub fn session(a: Ask) -> str {
+    let m = method_of(a.request) ?? "";
+    let msgs: List<str> = [
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"processId\":null,\"rootUri\":null,\"capabilities\":{}}}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"initialized\",\"params\":{}}",
+        f"{{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/didOpen\",\"params\":{{\"textDocument\":{{\"uri\":\"{URI}\",\"languageId\":\"nabi\",\"version\":1,\"text\":{quote(a.code)}}}}}}}",
+        f"{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"{m}\",\"params\":{{\"textDocument\":{{\"uri\":\"{URI}\"}},\"position\":{{\"line\":{a.line},\"character\":{a.character}}}}}}}",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"shutdown\"}",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}",
+    ];
+    let out = StrBuf::new();
+    for msg in msgs { out.push_str(f"Content-Length: {msg.len()}\r\n\r\n{msg}"); }
+    out.to_str()
+}
+
+/// The answer to request 2 in nabils' output, as `{"result":..}` with
+/// the buffer named `main.nabi`; `{"result":null}` when it answered
+/// with an error, none when it did not answer at all.
+pub fn answer(out: str) -> str | none {
+    let at = 0usize;
+    while let k: usize = out[at:].find("Content-Length:") {
+        let head = at + k + "Content-Length:".len();
+        let sep = out[head:].find("\r\n\r\n") ?? { return none; };
+        let n = try out[head:head + sep].trim().parse::<usize>() catch _ { return none; };
+        let start = head + sep + 4;
+        if start + n > out.len() { return none; }
+        let msg = out[start:start + n];
+        at = start + n;
+        if let r: str = reply_to(msg, "2") {
+            return "{\"result\":" + r.replace(f"\"{URI}\"", "\"main.nabi\"") + "}";
+        }
+    }
+    none
+}
+
+/// The raw `result` of `msg` when it is the reply to request `id`
+/// (`null` for an error reply), else none.
+fn reply_to(msg: str, id: str) -> str | none {
+    let i = skip_ws(msg, 0usize);
+    if i >= msg.len() || msg.byte(i) != 123u8 { return none; }
+    i = skip_ws(msg, i + 1);
+    let is_reply = false;
+    let result = "null";
+    loop {
+        let (key, after) = read_string(msg, i) ?? { return none; };
+        i = skip_ws(msg, after);
+        if i >= msg.len() || msg.byte(i) != 58u8 { return none; }
+        let v = skip_ws(msg, i + 1);
+        let end = skip_value(msg, v) ?? { return none; };
+        if key == "id" { is_reply = msg[v:end] == id; }
+        if key == "method" { return none; }
+        if key == "result" { result = msg[v:end]; }
+        i = skip_ws(msg, end);
+        if i >= msg.len() { return none; }
+        if msg.byte(i) == 125u8 { break; }
+        if msg.byte(i) != 44u8 { return none; }
+        i = skip_ws(msg, i + 1);
+    }
+    if is_reply { result } else { none }
+}
+
+fn skip_ws(s: str, i: usize) -> usize {
+    let j = i;
+    while j < s.len() {
+        let b = s.byte(j);
+        if b != 32u8 && b != 9u8 && b != 10u8 && b != 13u8 { break; }
+        j += 1;
+    }
+    j
+}
+
+/// The JSON string at `i`, decoded, and the index past it.
+fn read_string(s: str, i: usize) -> (str, usize) | none {
+    if i >= s.len() || s.byte(i) != 34u8 { return none; }
+    let out = StrBuf::new();
+    let j = i + 1;
+    let run = j;
+    while j < s.len() {
+        let b = s.byte(j);
+        if b == 34u8 {
+            out.push_str(s[run:j]);
+            return (out.to_str(), j + 1);
+        }
+        if b < 32u8 { return none; }
+        if b != 92u8 {
+            j += 1;
+            continue;
+        }
+        out.push_str(s[run:j]);
+        if j + 1 >= s.len() { return none; }
+        let e = s.byte(j + 1);
+        j += 2;
+        if e == 117u8 {
+            let (c, next) = read_escape(s, j - 2) ?? { return none; };
+            out.push(c);
+            j = next;
+        } else {
+            let c = match e {
+                34u8 => '"',
+                92u8 => '\\',
+                47u8 => '/',
+                98u8 => '\u{8}',
+                102u8 => '\u{c}',
+                110u8 => '\n',
+                114u8 => '\r',
+                116u8 => '\t',
+                _ => { return none; }
+            };
+            out.push(c);
+        }
+        run = j;
+    }
+    none
+}
+
+/// The `\uXXXX` escape at `i` (a surrogate pair as one), and the index
+/// past it.
+fn read_escape(s: str, i: usize) -> (char, usize) | none {
+    let hi = hex4(s, i) ?? { return none; };
+    if hi >= 0xD800u32 && hi < 0xDC00u32 {
+        let lo = hex4(s, i + 6) ?? { return none; };
+        if lo < 0xDC00u32 || lo >= 0xE000u32 { return none; }
+        let c = char::from_u32(0x10000u32 + ((hi - 0xD800u32) << 10u32) + (lo - 0xDC00u32)) ?? { return none; };
+        return (c, i + 12);
+    }
+    let c = char::from_u32(hi) ?? { return none; };
+    (c, i + 6)
+}
+
+/// The four hex digits of the `\u` escape at `i`.
+fn hex4(s: str, i: usize) -> u32 | none {
+    if i + 6 > s.len() || s.byte(i) != 92u8 || s.byte(i + 1) != 117u8 { return none; }
+    let v = 0u32;
+    for c in s[i + 2:i + 6].chars() {
+        let d = c.to_digit(16u32) ?? { return none; };
+        v = v * 16u32 + d;
+    }
+    v
+}
+
+/// A non-negative JSON integer at `i` (at most 9 digits), and the index
+/// past it.
+fn read_count(s: str, i: usize) -> (i64, usize) | none {
+    let j = i;
+    while j < s.len() && s.byte(j) >= 48u8 && s.byte(j) <= 57u8 { j += 1; }
+    if j == i || j - i > 9 { return none; }
+    if j < s.len() && (s.byte(j) == 46u8 || s.byte(j) == 101u8 || s.byte(j) == 69u8) { return none; }
+    let n = try s[i:j].parse::<i64>() catch _ { return none; };
+    (n, j)
+}
+
+/// The index past the JSON value at `i`: strings with their escapes,
+/// objects and arrays to their matching close, anything else to the
+/// next `,` `}` `]` or space.
+fn skip_value(s: str, i: usize) -> usize | none {
+    if i >= s.len() { return none; }
+    let b = s.byte(i);
+    if b == 34u8 { return string_end(s, i); }
+    if b != 123u8 && b != 91u8 {
+        let j = i;
+        while j < s.len() {
+            let c = s.byte(j);
+            if c == 44u8 || c == 125u8 || c == 93u8 || c == 32u8 || c == 10u8 || c == 13u8 || c == 9u8 { break; }
+            j += 1;
+        }
+        return if j == i { none } else { j };
+    }
+    let depth = 0usize;
+    let j = i;
+    while j < s.len() {
+        let c = s.byte(j);
+        if c == 34u8 {
+            j = string_end(s, j) ?? { return none; };
+            continue;
+        }
+        if c == 123u8 || c == 91u8 { depth += 1; }
+        if c == 125u8 || c == 93u8 {
+            depth -= 1;
+            if depth == 0 { return j + 1; }
+        }
+        j += 1;
+    }
+    none
+}
+
+/// The index past the JSON string at `i`, its escapes skipped.
+fn string_end(s: str, i: usize) -> usize | none {
+    let j = i + 1;
+    while j < s.len() {
+        let b = s.byte(j);
+        if b == 92u8 { j += 2; continue; }
+        if b == 34u8 { return j + 1; }
+        j += 1;
+    }
+    none
+}
+
+/// `s` as a JSON string.
+pub fn quote(s: str) -> str {
+    let digits = "0123456789abcdef";
+    let out = StrBuf::new();
+    out.push('"');
+    for c in s.chars() {
+        if c == '"' { out.push_str("\\\""); }
+        else if c == '\\' { out.push_str("\\\\"); }
+        else if c == '\n' { out.push_str("\\n"); }
+        else if c == '\r' { out.push_str("\\r"); }
+        else if c == '\t' { out.push_str("\\t"); }
+        else if (c as u32) < 32u32 {
+            let n = (c as u32) as usize;
+            out.push_str("\\u00");
+            out.push_str(digits[n >> 4:(n >> 4) + 1]);
+            out.push_str(digits[n & 15:(n & 15) + 1]);
+        } else { out.push(c); }
+    }
+    out.push('"');
+    out.to_str()
+}
+
+#[test]
+fn asks_parse() {
+    let a = parse_ask("{\"code\":\"fn main() {\\n\\tprintln(\\\"\\u00e9\\ud83d\\ude00\\\");\\n}\",\"request\":\"hover\",\"line\":1,\"character\":5}");
+    let ok = if let x: Ask = a { x.code == "fn main() {\n\tprintln(\"é😀\");\n}" && x.request == "hover" && x.line == 1i64 && x.character == 5i64 } else { false };
+    expect(ok, "a whole ask");
+    let b = parse_ask(" { \"extra\": [1, {\"x\": \"}\"}], \"line\" : 0 , \"character\":0, \"request\":\"definition\", \"code\":\"\" } ");
+    expect(b is Ask, "spaces, unknown keys, empty code");
+    expect(parse_ask("{\"code\":\"x\",\"request\":\"rename\",\"line\":0,\"character\":0}") is str, "unknown request");
+    expect(parse_ask("{\"code\":\"x\",\"request\":\"hover\",\"line\":-1,\"character\":0}") is str, "negative line");
+    expect(parse_ask("{\"code\":\"x\",\"request\":\"hover\",\"line\":1.5,\"character\":0}") is str, "fraction");
+    expect(parse_ask("{\"code\":\"x\",\"request\":\"hover\",\"line\":0}") is str, "no character");
+    expect(parse_ask("{\"code\":\"x\",\"request\":\"hover\",\"line\":0,\"character\":0} x") is str && parse_ask("fn main() {}") is str && parse_ask("{}") is str, "not one object");
+    expect(parse_ask("{\"code\":\"\\ud83d\",\"request\":\"hover\",\"line\":0,\"character\":0}") is str, "lone surrogate");
+}
+
+#[test]
+fn sessions_and_answers() {
+    let s = session(Ask { code: "a\"\n", request: "completion", line: 3i64, character: 7i64 });
+    expect(s.contains("\"text\":\"a\\\"\\n\"") && s.contains("\"method\":\"textDocument/completion\"") && s.contains("\"position\":{\"line\":3,\"character\":7}"), s);
+    expect(s.starts_with("Content-Length: ") && s.ends_with("{\"jsonrpc\":\"2.0\",\"method\":\"exit\"}"), "framed");
+    let m1 = "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"capabilities\":{}}}";
+    let note = "{\"jsonrpc\":\"2.0\",\"method\":\"textDocument/publishDiagnostics\",\"params\":{\"uri\":\"x\",\"id\":2}}";
+    let m2 = f"{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"uri\":\"{URI}\",\"range\":{{\"start\":{{\"line\":5,\"character\":8}}}}}}}}";
+    let out = f"Content-Length: {m1.len()}\r\n\r\n{m1}Content-Length: {note.len()}\r\n\r\n{note}Content-Length: {m2.len()}\r\n\r\n{m2}";
+    expect((answer(out) ?? "") == "{\"result\":{\"uri\":\"main.nabi\",\"range\":{\"start\":{\"line\":5,\"character\":8}}}}", answer(out) ?? "none");
+    let err = "{\"jsonrpc\":\"2.0\",\"id\":2,\"error\":{\"code\":-32601,\"message\":\"no\"}}";
+    expect((answer(f"Content-Length: {err.len()}\r\n\r\n{err}") ?? "") == "{\"result\":null}", "an error is no result");
+    expect(answer(f"Content-Length: {m1.len()}\r\n\r\n{m1}") is none && answer("") is none && answer("Content-Length: 99\r\n\r\n{}") is none, "no answer");
+    expect(quote("\u{1}é") == "\"\\u0001é\"", quote("\u{1}é"));
+}
+
+#[cfg(test)]
+fn expect(ok: bool, what: str) {
+    if !ok { panic(what); }
+}

@@ -3,7 +3,8 @@
 # network, a memory cap, a read-only root and a tmpfs. The toolchain is
 # baked in read-only; nabic has its own code generator and linker and the
 # toolchain ships each target's C library, so nothing else is needed to
-# build for wasm32-unknown-unknown.
+# build for wasm32-unknown-unknown. bin/nabils (the language server,
+# /api/lsp) comes with the toolchain; warm.sh warms its cache too.
 #
 # The image is warmed when it is built (scripts/warm.sh): nabic's cache
 # holds the standard library's stages, read as is at run time, and the

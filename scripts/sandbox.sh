@@ -1,8 +1,8 @@
 #!/bin/sh
-# One nabic build (or nabi fmt) of untrusted source, on Linux:
-# PLAY_WRAP=scripts/sandbox.sh.
+# One nabic build (or nabi fmt, or one nabils request) of untrusted
+# source, on Linux: PLAY_WRAP=scripts/sandbox.sh.
 #
-#   sandbox.sh <toolchain>/bin/nabic|nabi <args..>  (run in the job directory)
+#   sandbox.sh <toolchain>/bin/nabic|nabi|nabils <args..>  (run in the job directory)
 #   sandbox.sh --kill   (a no-op: --die-with-parent ends the sandbox with it)
 #   sandbox.sh --check  (bwrap and prlimit are there and bwrap can run;
 #                        with a user manager, systemd-run can make a scope)
@@ -27,10 +27,10 @@
 #
 # Needs bubblewrap and util-linux's prlimit. PLAY_NABIC must be the
 # toolchain's own nabic (not the ~/.nabi/bin proxy), so its lib/ is bound;
-# the nabi beside it runs `fmt`. The toolchain is bound read-only, so warm
-# its cache once beforehand (scripts/warm.sh <toolchain>): nabic then
-# reads the standard library's stages from it instead of building them
-# for every compile.
+# the nabi and nabils beside it run `fmt` and the language requests. The
+# toolchain is bound read-only, so warm its cache once beforehand
+# (scripts/warm.sh <toolchain>): nabic then reads the standard library's
+# stages from it instead of building them for every compile.
 set -eu
 # Mounts go in order: /tmp's tmpfs first, then the job directory (often
 # under /tmp) on top of it.
@@ -57,11 +57,11 @@ if [ "${1-}" = --check ]; then
   fi
   exit 0
 fi
-[ $# -ge 1 ] || { echo "usage: sandbox.sh <toolchain>/bin/nabic|nabi <args..>" >&2; exit 2; }
+[ $# -ge 1 ] || { echo "usage: sandbox.sh <toolchain>/bin/nabic|nabi|nabils <args..>" >&2; exit 2; }
 tool=$(basename "$1")
 case $tool in
-  nabic | nabi) ;;
-  *) echo "sandbox.sh: runs nabic or nabi, not $tool" >&2; exit 2 ;;
+  nabic | nabi | nabils) ;;
+  *) echo "sandbox.sh: runs nabic, nabi or nabils, not $tool" >&2; exit 2 ;;
 esac
 root=$(cd "$(dirname "$1")/.." && pwd)
 shift

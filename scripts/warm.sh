@@ -1,7 +1,8 @@
 #!/bin/sh
 # Warm a toolchain for the playground, before it is mounted read-only:
 # its nabic cache (lib/nabi-cache) gets the standard library's stages and
-# the function cache's code a hello reaches, for wasm32 at -O0 and -O2.
+# the function cache's code a hello reaches, for wasm32 at -O0 and -O2,
+# and nabils' stages for the host (its language requests check there).
 # With <out>, the packages a program may use are built for both levels
 # into <out>/wasm32-unknown-unknown/{debug,release}/deps (PLAY_DEPS is
 # that wasm32-unknown-unknown directory), and their names, in build
@@ -26,6 +27,20 @@ printf 'fn main() {\n    println("hi");\n}\n' > "$w/main.nabi"
 for o in 0 2; do
   (cd "$w" && HOME="$w" NABI_HOME="$w/.nabi" "$nabi/nabic" build -q --target=wasm32-unknown-unknown "-O$o" --target-dir t main.nabi -o main.wasm)
 done
+# The language server (/api/lsp) checks for the host: one hover on a
+# hello leaves the standard library's stages for that in the cache too,
+# or each request would build them again (about 1 s instead of 0.1 s).
+lsp() { printf 'Content-Length: %d\r\n\r\n%s' $(($(printf %s "$1" | wc -c))) "$1"; }
+if [ -x "$nabi/nabils" ]; then
+  {
+    lsp '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"processId":null,"rootUri":null,"capabilities":{}}}'
+    lsp '{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///play/main.nabi","languageId":"nabi","version":1,"text":"fn main() {\n    println(\"hi\");\n}\n"}}}'
+    lsp '{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///play/main.nabi"},"position":{"line":1,"character":5}}}'
+    lsp '{"jsonrpc":"2.0","id":3,"method":"shutdown"}'
+    lsp '{"jsonrpc":"2.0","method":"exit"}'
+  } | (cd "$w" && HOME="$w" NABI_HOME="$w/.nabi" "$nabi/nabils" > "$w/lsp.out")
+  grep -q '"id":2,"result":{' "$w/lsp.out" || echo "warm.sh: nabils gave no hover; /api/lsp will be slow" >&2
+fi
 [ $# -ge 2 ] || exit 0
 
 mkdir -p "$2"

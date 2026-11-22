@@ -20,6 +20,12 @@
 //                               a compile answered in X-Nabi-Module;
 //                               immutable, so a CDN may keep it. 404
 //                               when it is not (POST the source then)
+//   POST /api/lsp               body: JSON {code, request, line,
+//                               character}, request one of completion,
+//                               hover, definition (lsp.nabi). 200:
+//                               {"result": ..} as nabils answers, run in
+//                               the sandbox like a build; 400 / 413 / 429
+//                               / 503 / 504 for the request itself
 //   GET  /ko, /ko/p/<id>        the same pages in Korean (lang.nabi)
 //   GET  /api/health            200 `ok` and what is there, one
 //                               `key value` a line, or 503 and why (no
@@ -47,6 +53,7 @@
 // Settings come from the environment:
 //   PLAY_ADDR     127.0.0.1:8405    PLAY_NABIC    nabic
 //   PLAY_NABI     the `nabi` beside a PLAY_NABIC path, else nabi
+//   PLAY_NABILS   the `nabils` beside a PLAY_NABIC path, else nabils
 //   PLAY_SITE     ../nabi-lang.org/static
 //   PLAY_MJS      the toolchain's nabi.mjs; by default, for a PLAY_NABIC
 //                 path, <its dir>/../lib/nabi/targets/wasm32-unknown-unknown/
@@ -60,12 +67,14 @@
 //   PLAY_SHARE_MAX   100000 (links kept; past it, new ones are refused)
 //   PLAY_TAKEDOWN    <PLAY_SHARES>/takedown: share ids taken down, one a
 //                 line; re-read when it changes
+//   PLAY_LSP_RATE    60 (language requests per minute and client)
 //   PLAY_CLIENT_HEADER  (none)  the header a trusted proxy sets with the
 //                 real client IP, e.g. cf-connecting-ip behind Cloudflare
 //                 or x-forwarded-for behind Caddy. Unset (the default),
 //                 the TCP peer is the client, so a client cannot forge it.
 
 mod lang;
+mod lsp;
 
 use core::crypto::HashAlgorithm;
 use std::env;
@@ -83,6 +92,14 @@ use web::kit;
 use web::url;
 
 const MAX_SOURCE: usize = 65536;
+/// The most a request body may be: an /api/lsp body is the source as a
+/// JSON string, its newlines and quotes escaped, so up to about twice it.
+const MAX_BODY: usize = 2 * MAX_SOURCE + 4096;
+/// Seconds one language request may take: nabils checks the one file and
+/// answers, usually in well under a second.
+const LSP_TIMEOUT: u64 = 10u64;
+/// Language answers kept in memory; past it, all go.
+const MAX_LSP_CACHED: usize = 1024;
 /// The packages a program may use by default, each after the ones it
 /// depends on; `alias=name` is `name` under another name (stats imports
 /// special as `specfun`).
@@ -112,6 +129,8 @@ struct Cfg {
     nabic: str;
     /// `nabi`, for `fmt`.
     nabi: str;
+    /// `nabils`, for /api/lsp.
+    nabils: str = "nabils";
     site: str;
     mjs: str;
     /// The sandbox command line, split at spaces when used (a `List`
@@ -133,6 +152,8 @@ struct Cfg {
     share_max: i64;
     /// The takedown list's path (PLAY_TAKEDOWN).
     takedown: str = "";
+    /// Language requests a minute per client.
+    lsp_rate: i64 = 60i64;
     /// The og:image version: the first 10 hex digits of og.png's SHA-256,
     /// put in place of index.html's `og.png?v=dev` when it is served.
     og: str;
@@ -172,6 +193,12 @@ fn find_nabi(nabic: str) -> str {
     "nabi"
 }
 
+/// The `nabils` beside the toolchain's `nabic` (a path), else `nabils`.
+fn find_nabils(nabic: str) -> str {
+    if let k: usize = nabic.rfind("/") { return nabic[:k] + "/nabils"; }
+    "nabils"
+}
+
 /// The nabi.mjs of the toolchain at `nabic` (a path): its wasm32 runtime's.
 fn find_mjs(nabic: str) -> str {
     if let k: usize = nabic.rfind("/") { return nabic[:k] + "/../lib/nabi/targets/wasm32-unknown-unknown/nabi.mjs"; }
@@ -188,9 +215,10 @@ fn load_cfg() throws -> Cfg {
     let rate = try setting("PLAY_RATE", "30").parse::<i64>();
     let share_rate = try setting("PLAY_SHARE_RATE", "10").parse::<i64>();
     let share_max = try setting("PLAY_SHARE_MAX", "100000").parse::<i64>();
+    let lsp_rate = try setting("PLAY_LSP_RATE", "60").parse::<i64>();
     let deps = setting("PLAY_DEPS", "");
     let packages = setting("PLAY_PACKAGES", packages_of(deps));
-    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), takedown: setting("PLAY_TAKEDOWN", setting("PLAY_SHARES", work + "/shares") + "/takedown"), share_rate: share_rate, share_max: share_max, queue: queue, deps: deps, packages: packages, examples_off: examples_off(deps, packages), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic), ts: ts_versions() }
+    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), nabils: setting("PLAY_NABILS", find_nabils(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), takedown: setting("PLAY_TAKEDOWN", setting("PLAY_SHARES", work + "/shares") + "/takedown"), lsp_rate: lsp_rate, share_rate: share_rate, share_max: share_max, queue: queue, deps: deps, packages: packages, examples_off: examples_off(deps, packages), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic), ts: ts_versions() }
 }
 
 /// The packages warm.sh built into `deps` (its `packages` file, when
@@ -663,18 +691,36 @@ fn run_nabic(cfg: Cfg, src: str, opt: str, key: str) -> Resp {
 /// output in `dir/tool.log`: whether it succeeded, or the answer when it
 /// could not run or took longer than `secs`.
 fn run_tool(cfg: Cfg, prog: str, dir: str, args: List<str>, secs: u64, what: str) -> bool | Resp {
+    run_piped(cfg, prog, dir, args, secs, what, "")
+}
+
+/// run_tool with `input` as the tool's stdin (from `dir/tool.in`) and
+/// its stdout in `dir/tool.out` apart from stderr's tool.log, when
+/// `input` is not empty.
+fn run_piped(cfg: Cfg, prog: str, dir: str, args: List<str>, secs: u64, what: str, input: str) -> bool | Resp {
+    let piped = !input.is_empty();
+    if piped { try fs::write(dir + "/tool.in", input) catch e { return text(500, f"work directory: {e}"); }; }
     let log = try fs::create(dir + "/tool.log") catch e { return text(500, f"work directory: {e}"); };
-    let log2 = try log.try_clone() catch e {
+    let out = try (if piped { try fs::create(dir + "/tool.out") } else { try log.try_clone() }) catch e {
         try log.close() catch _ {};
         return text(500, f"work directory: {e}");
     };
+    let stdin = Stdio::Null;
+    if piped {
+        let f = try fs::open(dir + "/tool.in") catch e {
+            try log.close() catch _ {};
+            try out.close() catch _ {};
+            return text(500, f"work directory: {e}");
+        };
+        stdin = Stdio::File(f);
+    }
     let argv: List<str> = List::new();
     for w in words(cfg.wrap) { argv.push(w); }
     argv.push(prog);
     for a in args { argv.push(a); }
     let cmd = sandboxed(Command::new(argv[0]).args(argv[1:argv.len()].to_list()).current_dir(dir), dir, secs)
-        .stdin(Stdio::Null).stdout(Stdio::File(log)).stderr(Stdio::File(log2)).kill_on_drop(true);
-    // The command owns both log files and closes them once spawned.
+        .stdin(stdin).stdout(Stdio::File(out)).stderr(Stdio::File(log)).kill_on_drop(true);
+    // The command owns its files and closes them once spawned.
     let child = try cmd.spawn() catch e { return text(500, f"cannot start {prog}: {e}"); };
     let t0 = Instant::now();
     let limit = (secs as i64) * 1000i64;
@@ -811,6 +857,68 @@ fn format_in(cfg: Cfg, src: str, dir: str) -> Resp {
     let out = try fs::read_to_str(dir + "/main.nabi") catch e { return diagnostics(f"nabi fmt output: {e}\n"); };
     text(200, out)
 }
+
+/// Language answers by key (lsp_key): a page asks the same thing often
+/// (a hover moved off and back, a completion retyped).
+static LSP_CACHE: Mutex<Dict<str, str>> = Mutex::new(Dict::new());
+
+/// The answer cache's key for `a`: toolchain, packages, request,
+/// position and source.
+fn lsp_key(cfg: Cfg, a: lsp::Ask) -> str {
+    hex(HashAlgorithm::Sha256.digest(f"{cfg.release}\n{cfg.deps}\n{cfg.packages}\n{a.request}\n{a.line}:{a.character}\n{a.code}".as_bytes()))
+}
+
+/// POST /api/lsp: one completion, hover or definition from a nabils run
+/// for this request alone, in a job directory under the sandbox like a
+/// build. It takes a compile slot only when one is free at once, so
+/// typing never queues ahead of Run; the page drops what does not come.
+fn language(cfg: Cfg, body: str) -> Resp {
+    let ask = lsp::parse_ask(body);
+    if let why: str = ask { return text(400, f"{why}."); }
+    let a = if let x: lsp::Ask = ask { x } else { return text(400, "Bad request."); };
+    if a.code.len() > MAX_SOURCE { return too_large(); }
+    let key = lsp_key(cfg, a);
+    let hit = using g = LSP_CACHE.lock() { g.get().get(key) };
+    if let v: str = hit { return json(v, "hit"); }
+    if JOBS.fetch_add(1i64) >= cfg.jobs {
+        JOBS.fetch_sub(1i64);
+        return busy();
+    }
+    let dir = f"{cfg.work}/jobs/{std::process::id()}-{SEQ.fetch_add(1i64)}";
+    let r = language_in(cfg, a, dir);
+    try fs::remove_dir_all(dir) catch _ {};
+    JOBS.fetch_sub(1i64);
+    if r.status == 200 {
+        let v = try str::from_utf8(r.body[0:r.body.len()]) catch _ { "" };
+        using g = LSP_CACHE.lock() {
+            let d = g.get();
+            if d.len() >= MAX_LSP_CACHED {
+                d = Dict::new();
+                g.set(d);
+            }
+            d.insert(key, v);
+        }
+    }
+    r
+}
+
+fn language_in(cfg: Cfg, a: lsp::Ask, dir: str) -> Resp {
+    try fs::create_dir_all(dir) catch e { return text(500, f"work directory: {e}"); };
+    // The packages as nabic gets them for -O0, when the code names one.
+    let ran = run_piped(cfg, cfg.nabils, dir, externs(cfg, a.code, "0"), LSP_TIMEOUT, "The language request", lsp::session(a));
+    if let r: Resp = ran { return r; }
+    let out = try fs::read_to_str(dir + "/tool.out") catch _ { "" };
+    if let v: str = lsp::answer(out) { return json(v, "miss"); }
+    let err = (try fs::read_to_str(dir + "/tool.log") catch _ { "" }).trim();
+    eprintln(f"lsp: no answer from {cfg.nabils}: {(err.lines().next() ?? "").trim()}");
+    text(502, "The language server gave no answer; the editor works without it.")
+}
+
+fn json(v: str, cache: str) -> Resp {
+    Resp { status: 200, headers: ["Content-Type: application/json", "Cache-Control: no-store", "X-Nabi-Cache: " + cache], body: bytes_of(v) }
+}
+
+fn too_large() -> Resp { text(413, "The source is over 64 KiB; make it shorter.") }
 
 /// The id of `src`, and the name of the file a share link stores it in:
 /// the first 50 bits of its SHA-256 in base32, so the same code is
@@ -1136,6 +1244,7 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
         if !allow(client_of(s, r, cfg.client_header), cfg.rate) { return text(429, f"More than {cfg.rate} compiles a minute; wait a little."); }
         let opt = if r.query.contains("opt=2") { "2" } else { "0" };
         if r.body.trim().is_empty() { return text(400, "Nothing to compile."); }
+        if r.body.len() > MAX_SOURCE { return too_large(); }
         if let why: str = refused(r.body) { return diagnostics(why); }
         return compile(cfg, r.body, opt);
     }
@@ -1143,6 +1252,7 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
         if r.method != "POST" { return text(405, "POST the source to /api/fmt."); }
         if !allow(client_of(s, r, cfg.client_header), cfg.rate) { return text(429, f"More than {cfg.rate} requests a minute; wait a little."); }
         if r.body.trim().is_empty() { return text(400, "Nothing to format."); }
+        if r.body.len() > MAX_SOURCE { return too_large(); }
         return format(cfg, r.body);
     }
     if p == "/api/share" {
@@ -1150,7 +1260,14 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
         // Its own budget, apart from compiles.
         if !allow("share " + client_of(s, r, cfg.client_header), cfg.share_rate) { return text(429, f"More than {cfg.share_rate} links a minute; wait a little."); }
         if r.body.trim().is_empty() { return text(400, "Nothing to share."); }
+        if r.body.len() > MAX_SOURCE { return too_large(); }
         return share(cfg, r.body);
+    }
+    if p == "/api/lsp" {
+        if r.method != "POST" { return text(405, "POST a JSON request to /api/lsp."); }
+        // Its own budget: the editor asks as the visitor types.
+        if !allow("lsp " + client_of(s, r, cfg.client_header), cfg.lsp_rate) { return text(429, f"More than {cfg.lsp_rate} language requests a minute; wait a little."); }
+        return language(cfg, r.body);
     }
     if r.method != "GET" && r.method != "HEAD" { return text(405, "Only GET here."); }
     if p == "/api/health" { return health(cfg); }
@@ -1278,7 +1395,7 @@ fn not_found_in(cfg: Cfg, p: str, ko: bool) -> Resp {
 
 fn handle(s: TcpStream, cfg: Cfg) {
     let t0 = Instant::now();
-    let r = try http::read_request(s, MAX_SOURCE, Duration::secs(10)) catch e {
+    let r = try http::read_request(s, MAX_BODY, Duration::secs(10)) catch e {
         try http::send(s, e.status, ["Content-Type: text/plain; charset=utf-8"], e.msg + "\n", false) catch _ {};
         try s.close() catch _ {};
         return;
@@ -1593,6 +1710,33 @@ fn rate_keys() {
     expect(rate_key("64:ff9b::198.51.100.2") == "64:ff9b:0:0::/64", "embedded ipv4");
     expect(rate_key("2001:db8:1:2:3:4:5:6") != rate_key("2001:db8:1:3:3:4:5:6"), "other /64");
     expect(rate_key("1::2::3") == "1::2::3" && rate_key("2001:db8:xyz::1") == "2001:db8:xyz::1" && rate_key("1:2:3") == "1:2:3" && rate_key("?") == "?", "unparsable as given");
+}
+
+/// /api/lsp runs nabils under the wrap, the session on its stdin, and
+/// answers its reply, cached; a bad request says what to send.
+#[test]
+fn language_requests() {
+    let work = f"{env::temp_dir()}/nabi-playground-lsp-{std::process::id()}";
+    try fs::create_dir_all(work + "/jobs") catch e { panic(f"{e}"); };
+    let reply = f"{{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"uri\":\"{lsp::URI}\",\"range\":{{}}}}}}";
+    try fs::write(work + "/reply", f"Content-Length: {reply.len()}\r\n\r\n{reply}") catch e { panic(f"{e}"); };
+    try fs::write(work + "/nabils.sh", f"echo ran >> {work}/ran\ncat > {work}/got\necho 'a note' >&2\ncat {work}/reply\n") catch e { panic(f"{e}"); };
+    try fs::write(work + "/mute.sh", "cat > /dev/null\necho 'nabils: cannot run nabi' >&2\nexit 1\n") catch e { panic(f"{e}"); };
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", nabils: work + "/nabils.sh", site: "", mjs: "", wrap: "/bin/sh", work: work, jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "lsp-test" };
+    let ask = "{\"code\":\"fn main() {}\\n\",\"request\":\"definition\",\"line\":0,\"character\":3}";
+    let a = language(cfg, ask);
+    let b = language(cfg, ask);
+    let got = try fs::read_to_str(work + "/got") catch _ { "" };
+    let ran = try fs::read_to_str(work + "/ran") catch _ { "" };
+    let bad = language(cfg, "fn main() {}");
+    cfg.nabils = work + "/mute.sh";
+    let mute = language(cfg, "{\"code\":\"x\",\"request\":\"hover\",\"line\":0,\"character\":0}");
+    try fs::remove_dir_all(work) catch _ {};
+    expect(a.status == 200 && body_of(a) == "{\"result\":{\"uri\":\"main.nabi\",\"range\":{}}}" && a.headers.contains("Content-Type: application/json") && a.headers.contains("X-Nabi-Cache: miss"), body_of(a));
+    expect(b.status == 200 && b.headers.contains("X-Nabi-Cache: hit") && ran == "ran\n", f"cached: `{ran}`");
+    expect(got.contains("\"method\":\"textDocument/definition\"") && got.contains("\"text\":\"fn main() {}\\n\"") && got.ends_with("\"method\":\"exit\"}"), got);
+    expect(bad.status == 400 && body_of(bad).contains("send a JSON object"), body_of(bad));
+    expect(mute.status == 502 && body_of(mute).contains("works without it"), body_of(mute));
 }
 
 /// A compile names its module's key, and GET /api/wasm/<key> serves the

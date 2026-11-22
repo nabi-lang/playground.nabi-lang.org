@@ -65,6 +65,7 @@ Environment variables:
 | `PLAY_ADDR` | `127.0.0.1:8405` | Where to listen |
 | `PLAY_NABIC` | `nabic` | The compiler (the toolchain's own `bin/nabic`, not the proxy) |
 | `PLAY_NABI` | the `nabi` beside `PLAY_NABIC` | Runs `fmt` for `/api/fmt` |
+| `PLAY_NABILS` | the `nabils` beside `PLAY_NABIC` | The language server for `/api/lsp` |
 | `PLAY_MJS` | `<nabic dir>/../lib/nabi/targets/wasm32-unknown-unknown/nabi.mjs` | JS host served at `/nabi.mjs` |
 | `PLAY_SITE` | `../nabi-lang.org/static` | Fallback for static files in neither `static/` nor the kit |
 | `PLAY_WRAP` | (none) | Sandbox command nabic and nabi run under (see Deploy) |
@@ -79,11 +80,14 @@ Environment variables:
 | `PLAY_SHARE_RATE` | `10` | Share links a minute per client |
 | `PLAY_SHARE_MAX` | `100000` | Share links kept; past it new ones are refused (Share falls back to `#code=`) |
 | `PLAY_TAKEDOWN` | `<PLAY_SHARES>/takedown` | Share links taken down, one a line (see Takedowns) |
+| `PLAY_LSP_RATE` | `60` | Language requests (`/api/lsp`) a minute per client |
 | `PLAY_CLIENT_HEADER` | (none) | The header a trusted proxy puts the client address in (`cf-connecting-ip`, `x-forwarded-for`); unset, the TCP peer is the client |
 
 The compile API is `POST /api/compile?opt=0` (or `opt=2`) (body: UTF-8 source, max 64 KiB) returning `application/wasm`, or nabic's diagnostics as text with an `X-Nabi-Diagnostics: 1` header (both 200; 4xx/5xx only for the request itself). `POST /api/fmt` takes the same body and returns it as `nabi fmt` lays it out (run in a job directory under `PLAY_WRAP`, like a build, stopped after 5 s), or its diagnostics the same way. `POST /api/share` takes the same body and returns the short link's id (`GET /api/share/<id>` gives the source back, `/p/<id>` the page); see `src/main.nabi`. `GET /api/health` answers `ok` and the server's state (see Operations). Other paths answer 404 with `static/404.html`.
 
 A module answer names its cache key in `X-Nabi-Module` (64 hex digits). `GET /api/wasm/<key>` gives that module back while the cache holds it, with `Cache-Control: public, max-age=31536000, immutable`, so the browser and the CDN keep it: the page uses it when it knows the key (a Run of code it has run before, and a `/p/<id>` page, which names the keys the cache has for its code in `data-wasm0`/`data-wasm2`), and asks for a compile when it gets a 404.
+
+`POST /api/lsp` takes JSON, `{"code": "...", "request": "completion" | "hover" | "definition", "line": 0, "character": 0}` (an LSP position: 0-based line, UTF-16 character), and answers `{"result": ...}`, the result as nabils gives it, with the buffer called `main.nabi`. Each request runs `nabils` once in a job directory under `PLAY_WRAP`, like a build: no network, stopped after 10 s, with the session on its stdin (`initialize`, `didOpen`, the request, `shutdown`, `exit`; `src/lsp.nabi`). It takes a compile slot only when one is free (else 503 at once, so typing never queues ahead of Run), has its own rate limit (`PLAY_LSP_RATE`), and answers are cached in memory by toolchain, packages, request, position and source. A program that names a package gets the prebuilt ones as `--extern`, as a build does.
 
 ## Deploy (Linux)
 
@@ -91,7 +95,7 @@ nabic can read any file it reaches at compile time, so a sandbox is what keeps t
 
 The toolchain is read-only inside either sandbox, so warm it first: `scripts/warm.sh <toolchain> [<out> [<package sources>]]` builds the standard library's stages, and the function cache's code a hello reaches, for wasm32 at -O0 and -O2 into the toolchain's own nabic cache (`lib/nabi-cache`), which nabic then reads as is. With `<out>` it prebuilds the packages programs may use into `<out>/wasm32-unknown-unknown` and writes their `--extern` list to its `packages` file: the official packages a release toolchain carries (`lib/nabi/packages`), offline, as many as `PLAY_ALLOW` names (default json, toml, regex, linalg, autodiff, special, signal, units, stats, csv, table, plot, ode, optimize, interpolate, sparse, spatial), or every package in `<package sources>` (one directory each, for a toolchain built from source). A cold hello world costs nabic about 6.7 G instructions; with the warm cache about 1.3 G.
 
-- Docker (recommended): `scripts/docker-sandbox.sh` runs each compile in a throwaway container (`play-<job>`) with the job directory as the only writable mount, no network, read-only root, cgroup memory/CPU/process caps, a CPU-time ulimit, and the tool under `timeout` inside. After a timeout the server runs `docker-sandbox.sh --kill`, which removes the container: killing the docker client alone leaves it running. Build the image from an unpacked Linux release archive, which carries the official packages; `scripts/Dockerfile` runs `warm.sh` while it builds, without the network:
+- Docker (recommended): `scripts/docker-sandbox.sh` runs each compile (and each `nabi fmt` and `nabils` run) in a throwaway container (`play-<job>`) with the job directory as the only writable mount, no network, read-only root, cgroup memory/CPU/process caps, a CPU-time ulimit, and the tool under `timeout` inside. After a timeout the server runs `docker-sandbox.sh --kill`, which removes the container: killing the docker client alone leaves it running. Build the image from an unpacked Linux release archive, which carries the official packages; `scripts/Dockerfile` runs `warm.sh` while it builds, without the network:
 
 ```sh
 mkdir ctx && cp scripts/warm.sh ctx/
@@ -103,6 +107,8 @@ docker run --rm --entrypoint cat nabi-playground:current /opt/nabi-play/target/w
 ```
 
 Run the server with `PLAY_DEPS=/opt/nabi-play/target/wasm32-unknown-unknown` and `PLAY_PACKAGES` set to the list the last command prints (the server cannot read the image's file). Tune with `PLAY_IMAGE`, `PLAY_MEM` (default `4g`), `PLAY_CPUS` (default `2`), `PLAY_PIDS` (default `128`); the service user must run `docker`. Put a TLS reverse proxy in front and set `PLAY_CLIENT_HEADER` to the header it adds, or every client shares the proxy's rate limit.
+
+`/api/lsp` needs nothing more in the image: a Linux release archive ships `bin/nabils` beside `nabic` (it runs the `nabi lsp` beside it), the Dockerfile copies the whole toolchain, and `warm.sh` runs one nabils session while the image builds, so the standard library's stages for the host are in the read-only cache (without them each request costs about 1 s instead of 0.1 s). An image built before this needs a rebuild for that warm cache; with an older archive that lacks `bin/nabils`, the endpoint answers 502 and the editor goes on without completion, hover and definitions.
 
 - bubblewrap (lighter, no daemon): `scripts/sandbox.sh` runs each compile under bwrap with only the job directory writable, no network, and prlimit caps (address space, CPU time, file size). Real memory and the process count need a cgroup: when the service user has a systemd user manager (`loginctl enable-linger <user>`, and the unit sets `XDG_RUNTIME_DIR=/run/user/<uid>`, which the server passes to the script), each run gets its own transient scope, `systemd-run --user --scope -p MemoryMax=$PLAY_MEM -p MemorySwapMax=0 -p TasksMax=$PLAY_PIDS` (defaults `4G` and `128`), so a run past its memory is killed alone; `PLAY_WRAP --check` (and so `/api/health`) fails when the manager is there but cannot make a scope. Without one, or with `PLAY_SCOPE=off`, only the prlimit caps hold: run the service with `MemoryMax=6G` and `TasksMax=` in its unit then. Run `scripts/warm.sh <toolchain> <out>` before the service starts, and point `PLAY_DEPS` at `<out>/wasm32-unknown-unknown`, which `sandbox.sh` binds read-only beside the toolchain.
 
@@ -133,9 +139,10 @@ Requests to take a link down (code that is not the sharer's to share, personal d
 
 | File | Contents |
 |---|---|
-| `src/main.nabi` | Settings, compile and format API (job dir, sandbox, time limit, cache, rate limit), health, static files, the kit's files and markup, the 404 page |
+| `src/main.nabi` | Settings, compile, format and language API (job dir, sandbox, time limit, cache, rate limit), modules by key, share links and takedowns, health, static files, the kit's files and markup, the 404 page |
+| `src/lsp.nabi` | `/api/lsp`'s JSON and the nabils session it runs |
 | `src/lang.nabi` | The Korean pages: `/ko` addresses and the markup's Korean words |
 | `static/` | `index.html`, `404.html`, `play.tsx` and its `ui/*.tsx` components (`ui/text.ts`: the script's words in English and Korean), `run.ts` (the worker), `play.css`, `examples/*.nabi`, `og.png` |
 | `web/` | the web kit (submodule): `nabi.css`, `theme.js`, the marks and icons, and the `web` library (HTTP, addresses) |
 | `scripts/og.html` | Source of `static/og.png` |
-| `scripts/` | `Dockerfile` + `docker-sandbox.sh` (recommended), `sandbox.sh` (bubblewrap, with a systemd scope when it can), `warm.sh` (the toolchain's cache and the prebuilt packages), `probe.sh` (an uptime probe) |
+| `scripts/` | `Dockerfile` + `docker-sandbox.sh` (recommended), `sandbox.sh` (bubblewrap, with a systemd scope when it can), `warm.sh` (the toolchain's cache, nabils' included, and the prebuilt packages), `probe.sh` (an uptime probe) |
