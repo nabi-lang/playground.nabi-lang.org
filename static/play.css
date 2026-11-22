@@ -371,6 +371,7 @@ select.tb.mono { font-size: 12px; }
 
 /* The menu's English / Korean switch. */
 .langs { display: flex; gap: 12px; }
+.menu .legal { display: flex; flex-wrap: wrap; gap: 12px; }
 /* the header's language menu; on a phone the header has no room, and
    the More menu's switch is the way */
 @media (min-width: 521px) { .menu .langs { display: none; } }

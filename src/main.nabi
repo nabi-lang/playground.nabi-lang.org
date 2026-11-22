@@ -888,7 +888,7 @@ fn fill(html: str, ko: bool) -> str {
         chrome::not_found("Page not found", "There is no page at this address.", [("/", "Back to the playground")])
     };
     let made = if ko { chrome::MADE_BY_KO } else { chrome::MADE_BY };
-    html.replace("<!--web:fonts-->\n", chrome::fonts_in("/", ko)).replace("<!--web:theme-button-->", chrome::theme_button(ko)).replace("<!--web:header-sites-->", chrome::header_sites(sites, ko)).replace("<!--web:credits-->", f"<span>{chrome::LICENSE}</span> · {made}").replace("<!--web:social-->", chrome::SOCIAL).replace("<!--web:theme-seg-->", chrome::theme_seg(ko)).replace("<!--web:not-found-->", lost).replace("<!--web:wordmark-->", chrome::wordmark("Nabi"))
+    html.replace("<!--web:fonts-->\n", chrome::fonts_in("/", ko)).replace("<!--web:theme-button-->", chrome::theme_button(ko)).replace("<!--web:header-sites-->", chrome::header_sites(sites, ko)).replace("<!--web:credits-->", f"<span>{chrome::LICENSE}</span> · {made}").replace("<!--web:social-->", chrome::SOCIAL).replace("<!--web:legal-->", chrome::legal_links(ko)).replace("<!--web:theme-seg-->", chrome::theme_seg(ko)).replace("<!--web:not-found-->", lost).replace("<!--web:wordmark-->", chrome::wordmark("Nabi"))
             .replace("<!--web:icons-->\n", chrome::icons("/"))
 }
 
@@ -986,7 +986,7 @@ fn cached(x: Resp, page: bool, r: Request) -> Resp {
     // A page, and a file asked for without its current version: checked
     // on every load, so a deploy shows at once (http::FRESH). A file at
     // its current `?v=` never changes.
-    let cc = if !page && http::is_current(r.query, x.body) { http::IMMUTABLE } else { http::FRESH };
+    let cc = if !page && http::is_current(r.query, x.body) { http::IMMUTABLE } else if r.path.starts_with("/fonts/") { http::FONTS } else { http::FRESH };
     // headers[1] is file_resp's and kit_resp's Cache-Control.
     x.headers[1] = cc;
     x.headers.push("ETag: " + tag);
@@ -1024,6 +1024,9 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
     }
     if r.method != "GET" && r.method != "HEAD" { return text(405, "Only GET here."); }
     if p == "/api/health" { return health(cfg); }
+    if p == "/.well-known/security.txt" {
+        return Resp { status: 200, headers: ["Content-Type: text/plain; charset=utf-8", http::FRESH], body: bytes_of(chrome::security_txt("https://playground.nabi-lang.org")) };
+    }
     if p.starts_with("/api/share/") {
         let src = shared(cfg, p["/api/share/".len():]) ?? { return text(404, "No such link."); };
         return text(200, src);
@@ -1270,7 +1273,7 @@ fn caching() {
     expect(cached(asset(cfg, "/play.js") ?? panic("js"), false, get("/play.js", "\"nope\"")).status == 200, "other etag");
     let font = asset(cfg, "/fonts/Geist-Variable.woff2") ?? panic("no font");
     expect(font.headers[0] == "Content-Type: font/woff2", "font type");
-    expect(cached(font, false, get("/fonts/Geist-Variable.woff2", "")).headers.contains(http::FRESH), "font: unversioned, checked");
+    expect(cached(font, false, get("/fonts/Geist-Variable.woff2", "")).headers.contains(http::FONTS), "font: kept a year");
     expect((asset(cfg, "/fonts/pretendard.css") ?? panic("no pretendard.css")).headers[0] == "Content-Type: text/css; charset=utf-8", "pretendard.css");
     expect(asset(cfg, "/fonts/README.md") is none && asset(cfg, "/fonts/../nabi/nabi.nabion") is none, "fonts only");
     expect(body_of(page).contains("<link rel=\"preload\" href=\"/fonts/Geist-Variable.woff2\"") && !body_of(page).contains("googleapis") && !body_of(page).contains("jsdelivr"), "own fonts");
