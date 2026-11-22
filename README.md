@@ -82,6 +82,8 @@ Environment variables:
 
 The compile API is `POST /api/compile?opt=0` (or `opt=2`) (body: UTF-8 source, max 64 KiB) returning `application/wasm`, or nabic's diagnostics as text with an `X-Nabi-Diagnostics: 1` header (both 200; 4xx/5xx only for the request itself). `POST /api/fmt` takes the same body and returns it as `nabi fmt` lays it out (run in a job directory under `PLAY_WRAP`, like a build, stopped after 5 s), or its diagnostics the same way. `POST /api/share` takes the same body and returns the short link's id (`GET /api/share/<id>` gives the source back, `/p/<id>` the page); see `src/main.nabi`. `GET /api/health` answers `ok` and the server's state (see Operations). Other paths answer 404 with `static/404.html`.
 
+A module answer names its cache key in `X-Nabi-Module` (64 hex digits). `GET /api/wasm/<key>` gives that module back while the cache holds it, with `Cache-Control: public, max-age=31536000, immutable`, so the browser and the CDN keep it: the page uses it when it knows the key (a Run of code it has run before, and a `/p/<id>` page, which names the keys the cache has for its code in `data-wasm0`/`data-wasm2`), and asks for a compile when it gets a 404.
+
 ## Deploy (Linux)
 
 nabic can read any file it reaches at compile time, so a sandbox is what keeps the machine's files out of reach. Pick one for `PLAY_WRAP`.

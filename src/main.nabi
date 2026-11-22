@@ -15,6 +15,10 @@
 //                               run here); 400 / 409 / 413 / 429 / 503.
 //   GET  /api/share/<id>        the stored source, or 404
 //   GET  /p/<id>                the page with that source in the editor
+//   GET  /api/wasm/<sha256>     a module already in the cache, by the key
+//                               a compile answered in X-Nabi-Module;
+//                               immutable, so a CDN may keep it. 404
+//                               when it is not (POST the source then)
 //   GET  /ko, /ko/p/<id>        the same pages in Korean (lang.nabi)
 //   GET  /api/health            200 `ok` and what is there, one
 //                               `key value` a line, or 503 and why (no
@@ -532,15 +536,27 @@ fn tidy(err: str, dir: str) -> str {
     out.to_str().trim_end() + "\n"
 }
 
+/// The module cache's key for `src` at level `opt`: the SHA-256 of the
+/// toolchain, the packages, the level and the source, in hex.
+fn module_key(cfg: Cfg, src: str, opt: str) -> str {
+    hex(HashAlgorithm::Sha256.digest(f"{cfg.release}\n{cfg.deps}\n{cfg.packages}\n{opt}\n{src}".as_bytes()))
+}
+
+/// The cached module under `key`, renewed for the eviction's order, or
+/// none.
+fn cached_module(cfg: Cfg, key: str) -> List<u8> | none {
+    let path = cfg.work + "/cache/" + key + ".wasm";
+    let md = try fs::symlink_metadata(path) catch _ { return none; };
+    if !md.is_file() || md.len() == 0u64 || md.len() > MAX_WASM { return none; }
+    let wasm = try fs::read(path) catch _ { return none; };
+    touch(path, wasm);
+    wasm
+}
+
 fn compile(cfg: Cfg, src: str, opt: str) -> Resp {
-    let key = hex(HashAlgorithm::Sha256.digest(f"{cfg.release}\n{cfg.deps}\n{cfg.packages}\n{opt}\n{src}".as_bytes()));
-    let cached = cfg.work + "/cache/" + key + ".wasm";
-    if fs::exists(cached) {
-        let wasm = try fs::read(cached) catch _ { List::new() };
-        if wasm.len() > 0 {
-            touch(cached, wasm);
-            return Resp { status: 200, headers: ["Content-Type: application/wasm", "Cache-Control: no-store", "X-Nabi-Cache: hit"], body: wasm };
-        }
+    let key = module_key(cfg, src, opt);
+    if let wasm: List<u8> = cached_module(cfg, key) {
+        return Resp { status: 200, headers: ["Content-Type: application/wasm", "Cache-Control: no-store", "X-Nabi-Cache: hit", "X-Nabi-Module: " + key], body: wasm };
     }
     if !take_slot(cfg) { return busy(); }
     let r = run_nabic(cfg, src, opt, key);
@@ -738,7 +754,25 @@ fn build_in(cfg: Cfg, src: str, opt: str, key: str, dir: str) -> Resp {
     try fs::create_dir_all(cfg.work + "/cache") catch _ {};
     make_room(cfg.work + "/cache", MAX_CACHED);
     try fs::rename(dir + "/main.wasm", cfg.work + "/cache/" + key + ".wasm") catch _ {};
-    Resp { status: 200, headers: ["Content-Type: application/wasm", "Cache-Control: no-store", "X-Nabi-Cache: miss"], body: wasm }
+    Resp { status: 200, headers: ["Content-Type: application/wasm", "Cache-Control: no-store", "X-Nabi-Cache: miss", "X-Nabi-Module: " + key], body: wasm }
+}
+
+/// GET /api/wasm/<key>: a module the cache already holds, kept by
+/// browsers and the CDN for good (a key names one module), so a page
+/// that knows the key loads it without a compile request.
+fn wasm_by_key(cfg: Cfg, key: str) -> Resp {
+    if !valid_key(key) { return text(404, "No such module: the address takes the 64 hex digits of X-Nabi-Module."); }
+    let wasm = cached_module(cfg, key) ?? { return text(404, "This module is not in the cache; POST the source to /api/compile."); };
+    Resp { status: 200, headers: ["Content-Type: application/wasm", http::IMMUTABLE, "X-Nabi-Cache: hit"], body: wasm }
+}
+
+/// Whether `key` could be a module key: 64 lowercase hex digits.
+fn valid_key(key: str) -> bool {
+    if key.len() != 64 { return false; }
+    for c in key.chars() {
+        if !"0123456789abcdef".contains(f"{c}") { return false; }
+    }
+    true
 }
 
 /// `nabi fmt` on the source, in a job directory of its own: the source
@@ -842,12 +876,20 @@ fn count_shares(dir: str) -> i64 {
 /// The page with a stored source in it: in a hidden <pre> the script
 /// reads (the newline after <pre> is the one the parser drops), and kept
 /// out of search results.
+/// The <pre> also names the modules of the source the cache holds,
+/// `data-wasm0` and `data-wasm2` by level, so Run can GET them
+/// (/api/wasm/<key>) instead of asking for a compile.
 fn shared_page(cfg: Cfg, src: str, at: str, ko: bool) -> Resp | none {
     let r = page_in(cfg, "static/index.html", at, ko) ?? { return none; };
     let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return none; };
+    let mods = StrBuf::new();
+    for opt in ["0", "2"] {
+        let key = module_key(cfg, src, opt);
+        if fs::exists(cfg.work + "/cache/" + key + ".wasm") { mods.push_str(f" data-wasm{opt}=\"{key}\""); }
+    }
     // index.html has one <title> and one <main>.
     r.body = bytes_of(html.replace("<title>", "<meta name=\"robots\" content=\"noindex\">\n<title>")
-        .replace("<main ", f"<pre id=\"shared\" hidden>\n{chrome::esc(src)}</pre>\n<main "));
+        .replace("<main ", f"<pre id=\"shared\" hidden{mods.to_str()}>\n{chrome::esc(src)}</pre>\n<main "));
     r
 }
 
@@ -1033,6 +1075,7 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
         let src = shared(cfg, p["/api/share/".len():]) ?? { return text(404, "No such link."); };
         return text(200, src);
     }
+    if p.starts_with("/api/wasm/") { return wasm_by_key(cfg, p["/api/wasm/".len():]); }
     if p == "/nabi.mjs" && !cfg.mjs.is_empty() {
         if let f: Resp = file_resp(cfg.mjs) { return cached(f, false, r); }
     }
@@ -1461,4 +1504,26 @@ fn rate_keys() {
     expect(rate_key("64:ff9b::198.51.100.2") == "64:ff9b:0:0::/64", "embedded ipv4");
     expect(rate_key("2001:db8:1:2:3:4:5:6") != rate_key("2001:db8:1:3:3:4:5:6"), "other /64");
     expect(rate_key("1::2::3") == "1::2::3" && rate_key("2001:db8:xyz::1") == "2001:db8:xyz::1" && rate_key("1:2:3") == "1:2:3" && rate_key("?") == "?", "unparsable as given");
+}
+
+/// A compile names its module's key, and GET /api/wasm/<key> serves the
+/// cached module for good; a shared page names the keys it has.
+#[test]
+fn modules_by_key() {
+    let work = f"{env::temp_dir()}/nabi-playground-wasm-{std::process::id()}";
+    try fs::create_dir_all(work + "/jobs") catch e { panic(f"{e}"); };
+    try fs::write(work + "/nabic.sh", "printf '\\0asm' > main.wasm\n") catch e { panic(f"{e}"); };
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: work + "/nabic.sh", nabi: "", site: "", mjs: "", wrap: "/bin/sh", work: work, jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "wasm-test" };
+    let src = "fn main() {}\n";
+    let c = compile(cfg, src, "0");
+    let key = module_key(cfg, src, "0");
+    let got = wasm_by_key(cfg, key);
+    let page = body_of(shared_page(cfg, src, "/p/abcdefghij", false) ?? panic("page"));
+    let missing = wasm_by_key(cfg, module_key(cfg, src, "2"));
+    try fs::remove_dir_all(work) catch _ {};
+    expect(c.status == 200 && c.headers.contains("X-Nabi-Module: " + key) && c.headers.contains("X-Nabi-Cache: miss"), "compile names its key");
+    expect(got.status == 200 && got.body.len() == 4 && got.headers.contains(http::IMMUTABLE) && got.headers[0] == "Content-Type: application/wasm", "by key");
+    expect(missing.status == 404 && body_of(missing).contains("POST the source"), body_of(missing));
+    expect(wasm_by_key(cfg, "../cache/x").status == 404 && wasm_by_key(cfg, key.to_uppercase()).status == 404, "bad keys");
+    expect(page.contains(f"<pre id=\"shared\" hidden data-wasm0=\"{key}\">") && !page.contains("data-wasm2"), "shared page names the cached key");
 }
