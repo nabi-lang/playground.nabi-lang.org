@@ -25,11 +25,7 @@ ARG TOOLCHAIN
 COPY ${TOOLCHAIN}/ /opt/nabi/
 COPY warm.sh /opt/nabi-play/warm.sh
 ENV PATH=/opt/nabi/bin:$PATH NO_COLOR=1 NABI_INCREMENTAL=0
-# table 0.1.0, which the 0.1.0 toolchain carries, does not build for
-# wasm32-unknown-unknown (fixed in table 0.1.2); table and plot (which
-# needs it) stay out until a toolchain carries the fix.
-RUN PLAY_ALLOW="json toml regex linalg autodiff special signal units stats csv ode optimize interpolate sparse spatial" \
-    sh /opt/nabi-play/warm.sh /opt/nabi /opt/nabi-play/target \
+RUN sh /opt/nabi-play/warm.sh /opt/nabi /opt/nabi-play/target \
  && chmod -R a+rX /opt/nabi /opt/nabi-play
 WORKDIR /job
 ENTRYPOINT ["nabic"]
