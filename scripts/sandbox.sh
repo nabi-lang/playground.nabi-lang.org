@@ -4,6 +4,7 @@
 #
 #   sandbox.sh <toolchain>/bin/nabic|nabi <args..>  (run in the job directory)
 #   sandbox.sh --kill   (a no-op: --die-with-parent ends the sandbox with it)
+#   sandbox.sh --check  (bwrap and prlimit are there and bwrap can run)
 #
 # nabic can read any file it can reach at compile time (include_bytes!,
 # #[path], WIT) and put it in the module it writes, so it sees only the
@@ -25,6 +26,13 @@ set -eu
 # under /tmp) on top of it.
 
 [ "${1-}" = --kill ] && exit 0
+if [ "${1-}" = --check ]; then
+  for t in bwrap prlimit; do
+    command -v $t >/dev/null || { echo "no $t" >&2; exit 1; }
+  done
+  bwrap --unshare-all --ro-bind / / -- /bin/true 2>/dev/null || { echo "bwrap cannot make a sandbox" >&2; exit 1; }
+  exit 0
+fi
 [ $# -ge 1 ] || { echo "usage: sandbox.sh <toolchain>/bin/nabic|nabi <args..>" >&2; exit 2; }
 tool=$(basename "$1")
 case $tool in

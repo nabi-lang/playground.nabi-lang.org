@@ -16,8 +16,10 @@
 //   GET  /api/share/<id>        the stored source, or 404
 //   GET  /p/<id>                the page with that source in the editor
 //   GET  /ko, /ko/p/<id>        the same pages in Korean (lang.nabi)
-//   GET  /api/health            200 `ok` and the server's state, one
-//                               `key value` a line, for uptime checks
+//   GET  /api/health            200 `ok` and what is there, one
+//                               `key value` a line, or 503 and why (no
+//                               runner, a sandbox that fails its
+//                               check), for uptime checks
 //   GET  /...                   static/, then the web kit's files
 //                               (web/, built in) and its fonts
 //                               (/fonts/, web/assets/fonts), then
@@ -943,21 +945,81 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
     not_found(cfg, p)
 }
 
-/// For uptime checks and the operator: `ok`, then the compile slots in
-/// use, the requests waiting for one, the cached modules, the share
-/// links, the toolchain and whether programs can run (nabi.mjs). It
-/// runs no compile; a probe that wants one POSTs to /api/compile
-/// (scripts/probe.sh).
+/// For uptime checks: 200 and `ok`, then the toolchain, the runner, the
+/// sandbox and the packages, when programs can be built and run; else
+/// 503 and why, in one line. It runs no compile (a probe that wants one
+/// POSTs to /api/compile, scripts/probe.sh) and no counters: those stay
+/// in the log.
 fn health(cfg: Cfg) -> Resp {
-    let cached = 0i64;
-    // no cache directory yet: nothing compiled so far
-    if let d: fs::ReadDir = try? fs::read_dir(cfg.work + "/cache") {
-        for _ in d.results() { cached += 1i64; }
-    }
-    let run = !cfg.mjs.is_empty() && fs::exists(cfg.mjs);
+    if cfg.mjs.is_empty() || !fs::exists(cfg.mjs) { return text(503, "no nabi.mjs: pages cannot run programs\n"); }
+    let why = sandbox_down(cfg);
+    if !why.is_empty() { return text(503, f"sandbox: {why}\n"); }
     let packages = if cfg.deps.is_empty() { "none" } else { cfg.packages };
-    let body = f"ok\njobs {JOBS.load()}/{cfg.jobs}\nwaiting {WAITING.load()}\ncached {cached}\nshares {SHARES.load()}\nconnections {ACTIVE.load()}\nnabic {cfg.release}\nrun {run}\npackages {packages}\n";
-    text(if run { 200 } else { 503 }, body)
+    let sandbox = if words(cfg.wrap).is_empty() { "none" } else { "ok" };
+    text(200, f"ok\nnabic {cfg.release}\nrun true\nsandbox {sandbox}\npackages {packages}\n")
+}
+
+/// The sandbox's last check: when, and why it failed ("" when it works).
+struct Probe {
+    at: i64;
+    why: str;
+}
+
+static PROBES: Mutex<Dict<str, Probe>> = Mutex::new(Dict::new());
+
+/// Seconds a sandbox check holds, so health probes cannot load the box.
+const PROBE_TTL: i64 = 30i64;
+/// Seconds `PLAY_WRAP --check` may take.
+const PROBE_LIMIT: u64 = 5u64;
+
+/// Why the sandbox cannot build, or "": `PLAY_WRAP --check` at most
+/// once per PROBE_TTL, keyed by the wrap command. The lock is held
+/// across the check, so probes that come meanwhile wait for its answer.
+fn sandbox_down(cfg: Cfg) -> str {
+    if words(cfg.wrap).is_empty() { return ""; }
+    using g = PROBES.lock() {
+        let d = g.get();
+        let t = now_secs();
+        let last = d.get(cfg.wrap) ?? Probe { at: t - PROBE_TTL, why: "" };
+        if t - last.at < PROBE_TTL {
+            last.why
+        } else {
+            let why = check_sandbox(cfg);
+            d.insert(cfg.wrap, Probe { at: now_secs(), why: why });
+            why
+        }
+    }
+}
+
+/// `PLAY_WRAP --check` (docker-sandbox.sh: Docker answers and has the
+/// image; sandbox.sh: bwrap runs), in a directory of its own: "" when
+/// it succeeds, else the first line it wrote, or why it did not finish.
+fn check_sandbox(cfg: Cfg) -> str {
+    let dir = cfg.work + "/check";
+    try fs::create_dir_all(dir) catch e { return f"work directory: {e}"; };
+    let log = try fs::create(dir + "/check.log") catch e { return f"work directory: {e}"; };
+    let argv = words(cfg.wrap);
+    argv.push("--check");
+    let child = try sandboxed(Command::new(argv[0]).args(argv[1:argv.len()].to_list()).current_dir(dir), dir, PROBE_LIMIT)
+        .stdin(Stdio::Null).stdout(Stdio::Null).stderr(Stdio::File(log)).kill_on_drop(true).spawn() catch e {
+            return f"cannot start {argv[0]}: {e}";
+        };
+    let t0 = Instant::now();
+    loop {
+        let st = try child.try_wait() catch e { return f"{argv[0]}: {e}"; };
+        if let s: std::process::ExitStatus = st {
+            if s.success() { return ""; }
+            let err = try fs::read_to_str(dir + "/check.log") catch _ { "" };
+            let line = (err.trim().lines().next() ?? "").trim();
+            return if line.is_empty() { "the check failed" } else { line };
+        }
+        if t0.elapsed().as_ms() > (PROBE_LIMIT as i64) * 1000i64 {
+            try child.kill() catch _ {};
+            try child.wait() catch _ {};
+            return f"no answer in {PROBE_LIMIT} s";
+        }
+        thread::sleep(Duration::ms(25));
+    }
 }
 
 /// 404: the page with the site's chrome, or plain text under /api/.
@@ -1233,17 +1295,33 @@ fn korean_pages() {
     expect(!body_of(page_resp(cfg, "static/index.html") ?? panic("en")).contains("Official packages"), "no packages, no list");
 }
 
-/// /api/health says ok and the state, without compiling.
+/// /api/health says ok and what is there, or 503 and why in one line;
+/// the sandbox's check is cached.
 #[test]
 fn health_answers() {
     let work = f"{env::temp_dir()}/nabi-playground-health-{std::process::id()}";
-    try fs::create_dir_all(work + "/cache") catch e { panic(f"{e}"); };
+    try fs::create_dir_all(work) catch e { panic(f"{e}"); };
     try fs::write(work + "/nabi.mjs", "") catch e { panic(f"{e}"); };
+    try fs::write(work + "/up.sh", "[ \"$1\" = --check ] && echo ran >> ../ran\n") catch e { panic(f"{e}"); };
+    try fs::write(work + "/down.sh", "echo \"no image x\" >&2\necho more >&2\nexit 1\n") catch e { panic(f"{e}"); };
     let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: work + "/nabi.mjs", wrap: "", work: work, jobs: 3, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "9.9.9" };
     let ok = health(cfg);
+    cfg.wrap = "/bin/sh " + work + "/up.sh";
+    let up = health(cfg);
+    let again = health(cfg);
+    let ran = try fs::read_to_str(work + "/ran") catch _ { "" };
+    cfg.wrap = "/bin/sh " + work + "/down.sh";
+    let down = health(cfg);
+    // a fixed sandbox shows after the cache's time, not at once
+    try fs::write(work + "/down.sh", "exit 0\n") catch e { panic(f"{e}"); };
+    let still = health(cfg);
     cfg.mjs = "";
     let no = health(cfg);
     try fs::remove_dir_all(work) catch _ {};
-    expect(ok.status == 200 && body_of(ok).starts_with("ok\n") && body_of(ok).contains("jobs 0/3") && body_of(ok).contains("nabic 9.9.9") && body_of(ok).contains("packages none"), body_of(ok));
-    expect(no.status == 503 && body_of(no).contains("run false"), "no runner");
+    expect(ok.status == 200 && body_of(ok) == "ok\nnabic 9.9.9\nrun true\nsandbox none\npackages none\n", body_of(ok));
+    expect(up.status == 200 && body_of(up).contains("sandbox ok") && again.status == 200, body_of(up));
+    expect(ran == "ran\n", f"checked once: `{ran}`");
+    expect(down.status == 503 && body_of(down) == "sandbox: no image x\n", body_of(down));
+    expect(still.status == 503, "cached");
+    expect(no.status == 503 && body_of(no) == "no nabi.mjs: pages cannot run programs\n", "no runner");
 }

@@ -5,6 +5,7 @@
 #
 #   docker-sandbox.sh <nabic|nabi> <args..>  (run in the job directory)
 #   docker-sandbox.sh --kill                 (the same directory: stop it)
+#   docker-sandbox.sh --check                (Docker answers, the image is there)
 #
 # Only the host tool's name is used; the image's own nabic or nabi runs. The job
 # directory is the only writable mount, there is no network, the root is
@@ -20,11 +21,17 @@ set -eu
 
 job=$(pwd)
 name="play-$(basename "$job")"
+image=${PLAY_IMAGE:-nabi-playground:current}
+if [ "${1-}" = --check ]; then
+  docker version --format '{{.Server.Version}}' >/dev/null 2>&1 || { echo "docker does not answer" >&2; exit 1; }
+  docker image inspect --format '{{.Id}}' "$image" >/dev/null 2>&1 || { echo "no image $image" >&2; exit 1; }
+  exit 0
+fi
 if [ "${1-}" = --kill ]; then
   docker rm -f "$name" >/dev/null 2>&1 || true
   exit 0
 fi
-[ $# -ge 1 ] || { echo "usage: docker-sandbox.sh <nabic|nabi> <args..> | --kill" >&2; exit 2; }
+[ $# -ge 1 ] || { echo "usage: docker-sandbox.sh <nabic|nabi> <args..> | --kill | --check" >&2; exit 2; }
 tool=$(basename "$1")
 case $tool in
   nabic | nabi) ;;
@@ -47,4 +54,4 @@ exec docker run --rm --name "$name" --init --stop-timeout 1 \
   --env HOME=/job --env TMPDIR=/job \
   --volume "$job":/job --workdir /job \
   --entrypoint timeout \
-  "${PLAY_IMAGE:-nabi-playground:current}" -s KILL "$((limit + 5))" "$tool" "$@"
+  "$image" -s KILL "$((limit + 5))" "$tool" "$@"

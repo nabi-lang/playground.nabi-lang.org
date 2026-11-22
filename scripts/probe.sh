@@ -24,4 +24,4 @@ code=$(printf 'fn main() {\n    println("probe");\n}\n' | curl -s -o "$w/out" -w
   -H 'Content-Type: text/plain; charset=utf-8' --data-binary @- "$base/api/compile?opt=0") || fail "compile: no answer"
 [ "$code" = 200 ] || fail "compile: HTTP $code: $(head -c 200 "$w/out")"
 [ "$(od -An -tx1 -N4 "$w/out" | tr -d ' \n')" = 0061736d ] || fail "compile: not a module: $(head -c 200 "$w/out")"
-echo "probe $base: ok, compile $(($(date +%s) - t0)) s, $(sed -n 's/^jobs //p' "$w/health") jobs"
+echo "probe $base: ok, compile $(($(date +%s) - t0)) s"
