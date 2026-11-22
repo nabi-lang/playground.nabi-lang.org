@@ -11,6 +11,7 @@ Source for https://playground.nabi-lang.org, the browser playground for Nabi. Th
 - The page keeps the visitor's code in the browser's `localStorage` (edits to each example too, until Reset example). The server keeps source only when Share asks it to: `POST /api/share` stores it under `PLAY_SHARES` as `<id>.nabi`, the id being the first 50 bits of its SHA-256 in base32, and `/p/<id>` opens the page with it. A stored file is never rewritten, compiled or run by the server. When the server cannot store it, Share puts the deflated source in the link's `#code=` fragment instead (`#src=`, plain base64url, in browsers without deflate-raw).
 - An example has its own address, `/#example=<name>` (its file name in `static/examples/`, without `.nabi`). A link's or a share's address lasts until the first edit; then the address goes back to `/`. The picker leaves out an example that uses a package the server does not have (`PLAY_DEPS`, `PLAY_PACKAGES`).
 - Compiled modules are cached by SHA-256 of toolchain, packages, level and source.
+- The editor is [CodeMirror 6](https://codemirror.net/) with Nabi's highlighting, folding and indentation, nabic's diagnostics, and completion, hover and go-to-definition from the language server `nabils`, run on the server per request (see Editor).
 
 ## Run it locally
 
@@ -30,9 +31,21 @@ Without `PLAY_WRAP` the server only listens on loopback: an unsandboxed nabic co
 
 The page scripts are TypeScript and TSX: each file directly in `static/` is a page script, `static/ui/*.tsx` are the Preact components they render into the server's markup, and the kit's `web/js/*.ts` come along. `npm ci`, then `npm run build` bundles each page script to the `.js` beside it with esbuild (`web/tools/build.ts`: types erased, JSX for Preact, imports bundled, minified), and `npm run check` type-checks everything with `tsc`. Run the build before `nabi build`: the kit's scripts are built into the program and the site serves the rest. The `.js` files are build output and not checked in.
 
-## Highlighting
+## Editor
 
-The editor highlights with nabi-syntax's tree-sitter grammar and highlight queries, as the editors do: `static/ts/` holds the grammar built to wasm, `highlights.scm` and web-tree-sitter's own wasm (its version pinned in package.json), all served from this site. `static/highlight.ts` loads them after the page and re-parses only what each edit changed; captures map to nabi-syntax's classes (`k t s n c a m`), so the editor and the docs agree. Until it loads, or if it cannot, the editor keeps its small lexer (`static/ui/editor.tsx`).
+`static/editor/` is the editor, CodeMirror 6 bundled into `play.js` (its packages pinned in package.json):
+
+- `view.ts` puts it together and gives `play.tsx` a small `Editor` to drive (load a text, replace it as one undoable edit, go to a line, show diagnostics, read-only while the first code loads). CodeMirror's own keymaps stand: Ctrl/⌘+F finds and replaces, Ctrl/⌘+/ toggles `//` comments, Ctrl/⌘+D, Ctrl/⌘+Alt+Up/Down, Alt-drag and Ctrl/⌘-click away from a name make more cursors, Ctrl+Shift+[ and ] (⌘+Alt+[ and ] on a Mac) fold and unfold, Ctrl/⌘+Enter runs. Tab indents; Escape, then Tab, leaves the editor (CodeMirror's tab focus mode), so the keyboard is never trapped.
+- `syntax.ts`: highlighting, folding by indentation, and indentation itself (four spaces, one more after an opening bracket, one less before a closing one).
+- `lint.tsx`: nabic's diagnostics as CodeMirror lint diagnostics: the wavy underline and its tooltip, the marked line numbers, the panel Ctrl/⌘+Shift+M opens (a list screen readers read) and F8 to step through them. An edit clears them; a `main.nabi:L:C` in the output puts the caret there.
+- `lsp.ts` and `transport.ts`: completion (as a name is typed, after `.` and `::`, and on Ctrl+Space), hover (after 400 ms) and the definition (F12, or Ctrl/⌘-click on a name) from `nabils`. The transport today is `POST /api/lsp`; it is silent when the endpoint is missing, slow (3 s) or busy, and pauses itself then. A wasm build of nabils in a Worker can replace it behind the same `Transport` interface.
+- `style.ts`: the page's CSP allows no inline `<style>`, which is where CodeMirror puts its base styles; they go into `play.css`'s own stylesheet instead, ahead of its rules, so `play.css` styles the editor with the site's tokens in both themes.
+
+The scripts weigh, gzipped: `play.js` 142 KB (before CodeMirror, 16 KB), `highlight.js` 21 KB plus its wasm, loaded after the page, `run.js` 1 KB.
+
+### Highlighting
+
+The editor highlights with nabi-syntax's tree-sitter grammar and highlight queries, as the editors do: `static/ts/` holds the grammar built to wasm, `highlights.scm` and web-tree-sitter's own wasm (its version pinned in package.json), all served from this site. `static/highlight.ts` loads them after the page and re-parses only what each edit changed; captures map to nabi-syntax's classes (`k t s n c a m`), one per UTF-16 unit, which CodeMirror's positions count too, so the editor and the docs agree. Until it loads, or if it cannot, the editor keeps its small lexer (`static/editor/syntax.ts`).
 
 The grammar is pinned to the nabi-syntax commit in `nabi-syntax.rev`. Change it in nabi-syntax, then sync (needs the tree-sitter CLI):
 
@@ -142,7 +155,7 @@ Requests to take a link down (code that is not the sharer's to share, personal d
 | `src/main.nabi` | Settings, compile, format and language API (job dir, sandbox, time limit, cache, rate limit), modules by key, share links and takedowns, health, static files, the kit's files and markup, the 404 page |
 | `src/lsp.nabi` | `/api/lsp`'s JSON and the nabils session it runs |
 | `src/lang.nabi` | The Korean pages: `/ko` addresses and the markup's Korean words |
-| `static/` | `index.html`, `404.html`, `play.tsx` and its `ui/*.tsx` components (`ui/text.ts`: the script's words in English and Korean), `run.ts` (the worker), `play.css`, `examples/*.nabi`, `og.png` |
+| `static/` | `index.html`, `404.html`, `play.tsx`, its editor (`editor/`, see Editor) and its `ui/*.tsx` components (`ui/text.ts`: the script's words in English and Korean), `highlight.ts` (tree-sitter), `run.ts` (the worker), `play.css`, `examples/*.nabi`, `og.png` |
 | `web/` | the web kit (submodule): `nabi.css`, `theme.js`, the marks and icons, and the `web` library (HTTP, addresses) |
 | `scripts/og.html` | Source of `static/og.png` |
 | `scripts/` | `Dockerfile` + `docker-sandbox.sh` (recommended), `sandbox.sh` (bubblewrap, with a systemd scope when it can), `warm.sh` (the toolchain's cache, nabils' included, and the prebuilt packages), `probe.sh` (an uptime probe) |

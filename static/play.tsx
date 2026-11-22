@@ -1,20 +1,19 @@
-// The playground page: an editor with highlighting, the compile request,
-// a worker that runs the module, examples, and share links (a short
-// /p/<id> link the server stores, else the code deflated in the link's
-// #fragment). What the script builds (the editor's layers, the
-// transcript, the tooltip, the example list, the Run button's face)
-// comes from Preact components in ui/, rendered into the page's own
-// elements.
+// The playground page: the editor (editor/, CodeMirror), the compile
+// request, a worker that runs the module, examples, and share links (a
+// short /p/<id> link the server stores, else the code deflated in the
+// link's #fragment). What the script builds besides the editor (the
+// transcript, the example list, the Run button's face) comes from
+// Preact components in ui/, rendered into the page's own elements.
 import { render } from "preact";
 import type { VNode } from "preact";
-import { Code, Gutter, Underlines } from "./ui/editor.tsx";
-import type { Diag } from "./ui/editor.tsx";
+import { createEditor } from "./editor/view.ts";
+import type { Diag } from "./editor/view.ts";
+import { httpTransport } from "./editor/transport.ts";
 import type { Highlighter } from "./highlight.ts";
 import { Examples } from "./ui/examples.tsx";
 import { Batch, Output } from "./ui/output.tsx";
 import type { Chunk } from "./ui/output.tsx";
 import { RunLabel } from "./ui/run-label.tsx";
-import { Tip } from "./ui/tip.tsx";
 import { BASE, KO, T } from "./ui/text.ts";
 
 // An element the page always has.
@@ -22,16 +21,11 @@ const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getEl
 // Elements that keep a pending animation or timer on themselves.
 type Resizable = HTMLElement & { rz?: Animation };
 type Timed = HTMLButtonElement & { reset?: ReturnType<typeof setTimeout> };
-const ed = $<HTMLTextAreaElement>("editor");
-const hl = document.querySelector<HTMLElement>(".hl")!;
-const gutter = document.querySelector<HTMLOListElement>(".gutter")!;
 const out = $<HTMLPreElement>("out");
 const status = $("status");
 const runBtn = $<HTMLButtonElement>("run");
 const pick = $<HTMLSelectElement>("example");
 const opt = $<HTMLSelectElement>("opt");
-const sqs = document.querySelector<HTMLElement>(".sqs")!;
-const tip = $<HTMLDivElement>("tip");
 const pos = $("pos");
 const diagBtn = $<HTMLButtonElement>("diag");
 
@@ -62,59 +56,39 @@ function resize(el: Resizable, change: () => void): void {
   el.rz = el.animate([from, to], { duration: 200, easing: "cubic-bezier(.2,0,0,1)" });
 }
 
+// The last failed compile's diagnostics that point into main.nabi.
+// Cleared on the next edit (lint.tsx clears the editor's own).
+let diags: Diag[] = [];
+
+const editor = createEditor($("editor"), {
+  labelledBy: "ed-label",
+  describedBy: "ed-help diag",
+  run: () => { void run(); },
+  changed: () => {
+    if (diags.length) { diags = []; showDiagCount(); }
+    keep();
+  },
+  moved: (line, col) => { pos.textContent = T.pos(line, col); },
+  transport: httpTransport(),
+});
+// Until the start-up below has put the first code in, typing would be
+// lost under it.
+editor.setReadOnly(true);
+
 // nabi-syntax's tree-sitter highlighting (highlight.ts), loaded after
 // the page; until then, or if it cannot load, the editor's own lexer.
-let highlighter: Highlighter | null = null;
 addEventListener("load", () => {
   import("/highlight.js")
     .then(() => globalThis.nabiHighlight)
-    .then((h) => { if (h) { highlighter = h; paint(); } })
+    .then((h) => { if (h) editor.setHighlighter(h); })
     .catch(() => {});
 });
 
-// The last failed compile's diagnostics that point into main.nabi.
-// Cleared on the next edit.
-let diags: Diag[] = [];
-
-// The layers follow the text on every edit; the gutter only when its
-// line count or its marks change.
-function paint(): void {
-  let cls: Uint8Array | null = null;
-  try { cls = highlighter ? highlighter.classes(ed.value) : null; } catch { highlighter = null; }
-  render(<Code text={ed.value} cls={cls} />, hl);
-  render(diags.length ? <Underlines text={ed.value} diags={diags} /> : null, sqs);
-  const n = ed.value.split("\n").length;
-  if (gutter.childElementCount !== n || gutter.dataset.marked || diags.length) {
-    const bad = new Map(diags.filter((d) => d.line).map((d) => [d.line, d.warn ? "warn" : "bad"]));
-    render(<Gutter lines={n} marks={bad} />, gutter);
-    if (bad.size) gutter.dataset.marked = "1"; else delete gutter.dataset.marked;
-  }
+function setDiags(list: Diag[]): void {
+  diags = list;
+  editor.setDiagnostics(list);
   showDiagCount();
 }
-function sync(): void {
-  for (const el of [hl, sqs]) { el.scrollTop = ed.scrollTop; el.scrollLeft = ed.scrollLeft; }
-  gutter.scrollTop = ed.scrollTop;
-  hideTip();
-}
-
-ed.addEventListener("input", () => { diags = []; hideTip(); paint(); keep(); });
-ed.addEventListener("scroll", sync);
-
-// Caret position, diagnostics count, and the diagnostic tooltip.
-
-function caretAt(i: number): { line: number; col: number } {
-  const before = ed.value.slice(0, i);
-  const line = before.split("\n").length;
-  return { line, col: i - before.lastIndexOf("\n") };
-}
-function showPos(): void {
-  const { line, col } = caretAt(ed.selectionStart);
-  pos.textContent = T.pos(line, col);
-  const d = diags.find((x) => x.line === line);
-  if (d && document.activeElement === ed) showTip(d); else if (!hovering) hideTip();
-}
-document.addEventListener("selectionchange", () => { if (document.activeElement === ed) showPos(); });
-ed.addEventListener("blur", () => { if (!hovering) hideTip(); });
 
 function showDiagCount(): void {
   const errs = diags.filter((d) => !d.warn).length, warns = diags.length - errs;
@@ -131,165 +105,15 @@ function showDiagCount(): void {
 // Puts the caret at line:col and scrolls it into view. On stacked
 // panes the editor comes back into view too.
 function goTo(line: number, col: number): void {
-  const lines = ed.value.split("\n");
-  let i = 0;
-  for (let k = 0; k < line - 1 && k < lines.length; k++) i += lines[k]!.length + 1;
-  i += Math.min(col - 1, (lines[line - 1] || "").length);
-  ed.focus({ preventScroll: true });
-  ed.setSelectionRange(i, i);
-  const cs = getComputedStyle(ed);
-  const lh = parseFloat(cs.lineHeight);
-  ed.scrollTop = Math.max(0, (line - 4) * lh);
-  const x = parseFloat(cs.paddingLeft) + (col - 1) * cellWidth();
-  if (x < ed.scrollLeft || x > ed.scrollLeft + ed.clientWidth - 24) ed.scrollLeft = Math.max(0, x - ed.clientWidth / 2);
-  sync();
-  const pane = ed.closest(".ed-pane")!.getBoundingClientRect();
-  if (pane.top < 0 || pane.bottom > innerHeight) ed.closest(".ed-pane")!.scrollIntoView({ block: "nearest" });
-  showPos();
+  editor.goTo(line, col);
+  const pane = editor.view.dom.closest(".ed-pane")!.getBoundingClientRect();
+  if (pane.top < 0 || pane.bottom > innerHeight) editor.view.dom.closest(".ed-pane")!.scrollIntoView({ block: "nearest" });
 }
 // The count jumps to the first diagnostic with a place in the source.
 diagBtn.addEventListener("click", () => {
   const d = diags.find((x) => x.line);
   if (d) goTo(d.line, d.col);
 });
-
-// One monospace cell, measured once the fonts are in.
-let cell = 0;
-function cellWidth(): number {
-  if (cell) return cell;
-  const probe = document.createElement("span");
-  probe.textContent = "0".repeat(40);
-  sqs.append(probe);
-  cell = probe.getBoundingClientRect().width / 40;
-  probe.remove();
-  return cell;
-}
-document.fonts && document.fonts.ready.then(() => { cell = 0; });
-
-function showTip(d: Diag): void {
-  render(<Tip d={d} />, tip);
-  const cs = getComputedStyle(ed);
-  const lh = parseFloat(cs.lineHeight), padT = parseFloat(cs.paddingTop), padL = parseFloat(cs.paddingLeft);
-  tip.hidden = false;
-  const box = ed.parentElement!.getBoundingClientRect();
-  let left = padL + (d.col - 1) * cellWidth() - ed.scrollLeft - 12;
-  left = Math.max(8, Math.min(left, box.width - tip.offsetWidth - 8));
-  tip.style.left = `${left}px`;
-  tip.style.top = `${tipTop(d.line, tip.offsetHeight, box.height, lh, padT)}px`;
-}
-// Below the line, else above it, else past the run of marked lines it
-// sits in: never over another underlined line if there is room.
-function tipTop(line: number, h: number, room: number, lh: number, padT: number): number {
-  const y = (n: number): number => padT + (n - 1) * lh - ed.scrollTop;
-  const marked = new Set(diags.map((x) => x.line));
-  let a = line, b = line;
-  while (marked.has(a - 1)) a--;
-  while (marked.has(b + 1)) b++;
-  const fits = (t: number): boolean => t >= 4 && t + h <= room - 4;
-  const clear = (t: number): boolean => fits(t) && ![...marked].some((n) => n !== line && y(n) < t + h && y(n) + lh > t);
-  const tries = [y(line + 1) + 6, y(line) - h - 6, y(b + 1) + 6, y(a) - h - 6] as const;
-  return tries.find(clear) ?? tries.find(fits) ?? tries[0];
-}
-function hideTip(): void { tip.hidden = true; }
-
-// Hovering the underlined span shows its diagnostic too.
-let hovering = false;
-ed.addEventListener("mousemove", (ev) => {
-  if (!diags.length) return;
-  const cs = getComputedStyle(ed);
-  const lh = parseFloat(cs.lineHeight);
-  const line = Math.floor((ev.offsetY + ed.scrollTop - parseFloat(cs.paddingTop)) / lh) + 1;
-  const col = Math.floor((ev.offsetX + ed.scrollLeft - parseFloat(cs.paddingLeft)) / cellWidth()) + 1;
-  const d = diags.find((x) => x.line === line && col >= x.col && col < x.col + Math.max(x.len, 1));
-  hovering = !!d;
-  if (d) showTip(d); else if (!(document.activeElement === ed && diags.some((x) => x.line === caretAt(ed.selectionStart).line))) hideTip();
-});
-ed.addEventListener("mouseleave", () => { hovering = false; if (document.activeElement !== ed) hideTip(); else showPos(); });
-// A code-editor keystroke: what to do (or null to leave it to the
-// textarea). The handler applies it with execCommand so undo still works.
-type EditAction =
-  | { insert: string; caret: number }
-  | { replace: [number, number]; text: string; sel: [number, number] }
-  | { del: [number, number] }
-  | { caret: number };
-const PAIRS: Record<string, string> = { "{": "}", "(": ")", "[": "]" };
-function editAction(v: string, s: number, e: number, key: string, shift: boolean): EditAction | null {
-  const lineStart = v.lastIndexOf("\n", s - 1) + 1;
-  const indent = (v.slice(lineStart, s).match(/^[ \t]*/) || [""])[0];
-  const before = v[s - 1], after = v[s];
-
-  if (key === "Enter" && !shift && s === e) {
-    if (before === "{" && after === "}") {
-      return { insert: "\n" + indent + "    \n" + indent, caret: 1 + indent.length + 4 };
-    }
-    const add = before !== undefined && "{([".includes(before) ? "    " : "";
-    return { insert: "\n" + indent + add, caret: 1 + indent.length + add.length };
-  }
-
-  if (key === "Tab") {
-    if (s === e && !shift) return { insert: "    ", caret: 4 };
-    const ls = lineStart;
-    let le = v.indexOf("\n", e > s ? e - 1 : e);
-    if (le === -1) le = v.length;
-    const out = v.slice(ls, le).split("\n").map((ln) => {
-      if (shift) {
-        if (ln.startsWith("    ")) return ln.slice(4);
-        if (ln.startsWith("\t")) return ln.slice(1);
-        return ln.replace(/^ {1,3}/, "");
-      }
-      return ln === "" ? ln : "    " + ln;
-    }).join("\n");
-    return { replace: [ls, le], text: out, sel: [ls, ls + out.length] };
-  }
-
-  if (s === e) {
-    if (PAIRS[key]) {
-      if (!after || /[\s)\]},;]/.test(after)) return { insert: key + PAIRS[key], caret: 1 };
-      return null;
-    }
-    if (key === '"') {
-      if (after === '"') return { caret: s + 1 };
-      if (!after || /[\s)\]},;]/.test(after)) return { insert: '""', caret: 1 };
-      return null;
-    }
-    if ((key === "}" || key === ")" || key === "]") && after === key) return { caret: s + 1 };
-    if (key === "Backspace" && (PAIRS[before ?? ""] === after || (before === '"' && after === '"'))) {
-      return { del: [s - 1, s + 1] };
-    }
-  }
-  return null;
-}
-
-// Tab indents, so Escape first hands the next Tab back to the browser
-// and keyboard users can leave the editor (no keyboard trap).
-let escaped = false;
-ed.addEventListener("blur", () => { escaped = false; });
-ed.addEventListener("keydown", (ev) => {
-  if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter") { ev.preventDefault(); run(); return; }
-  if (ev.key === "Escape") { escaped = true; hideTip(); return; }
-  if (ev.key === "Shift") return;
-  if (ev.key === "Tab" && escaped) { escaped = false; return; }
-  escaped = false;
-  if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
-  const a = editAction(ed.value, ed.selectionStart, ed.selectionEnd, ev.key, ev.shiftKey);
-  if (!a) return;
-  ev.preventDefault();
-  const s = ed.selectionStart;
-  if ("insert" in a) {
-    document.execCommand("insertText", false, a.insert);
-    ed.setSelectionRange(s + a.caret, s + a.caret);
-  } else if ("replace" in a) {
-    ed.setSelectionRange(a.replace[0], a.replace[1]);
-    document.execCommand("insertText", false, a.text);
-    ed.setSelectionRange(a.sel[0], a.sel[1]);
-  } else if ("del" in a) {
-    ed.setSelectionRange(a.del[0], a.del[1]);
-    document.execCommand("delete");
-  } else if ("caret" in a) {
-    ed.setSelectionRange(a.caret, a.caret);
-  }
-});
-
 
 // What the editor shows: the visitor's own code ("mine", kept in
 // localStorage "play.mine"), code from a share link ("link", kept in
@@ -346,27 +170,24 @@ function syncAddress(): void {
 
 // Untouched Hello world is still Hello world, not "Your code".
 function syncPick(): void {
-  pick.value = view === "mine" && ed.value === texts.get("hello") ? "hello" : view;
-  resetBtn.hidden = !(NAMES.has(view) && texts.has(view) && ed.value !== texts.get(view));
+  const text = editor.text();
+  pick.value = view === "mine" && text === texts.get("hello") ? "hello" : view;
+  resetBtn.hidden = !(NAMES.has(view) && texts.has(view) && text !== texts.get(view));
 }
 function show(text: string, v: string): void {
   view = v;
   if (v === "mine" || v === "link") store.set("play.view", v);
-  ed.value = text;
+  editor.load(text);
   diags = [];
-  hideTip();
-  paint();
-  ed.setSelectionRange(0, 0);
-  ed.scrollTop = ed.scrollLeft = 0;
-  sync();
+  showDiagCount();
   syncPick();
-  showPos();
 }
 function keep(): void {
-  if (view === "mine") { mine = ed.value; store.set("play.mine", mine); }
-  else if (view === "link") { linked = ed.value; store.set("play.link", linked); }
-  else if (ed.value === texts.get(view)) store.del(`play.ex.${view}`);
-  else store.set(`play.ex.${view}`, ed.value);
+  const text = editor.text();
+  if (view === "mine") { mine = text; store.set("play.mine", mine); }
+  else if (view === "link") { linked = text; store.set("play.link", linked); }
+  else if (text === texts.get(view)) store.del(`play.ex.${view}`);
+  else store.set(`play.ex.${view}`, text);
   syncPick();
   syncAddress();
 }
@@ -376,7 +197,8 @@ function addLinkOption(): void {
 // An example as last edited here, and what it prints.
 async function showExample(name: string): Promise<void> {
   let orig: string;
-  try { orig = await exampleText(name); } catch { say(T.down, "bad"); return; }
+  editor.setReadOnly(true);
+  try { orig = await exampleText(name); } catch { say(T.down, "bad"); return; } finally { editor.setReadOnly(false); }
   show(store.get(`play.ex.${name}`) ?? orig, name);
   if (name === "input" && !stdinEd.value.trim()) { setStdin(SAMPLE_INPUT); stdinOpen(true); }
   run(true);
@@ -392,13 +214,8 @@ pick.addEventListener("change", async () => {
 resetBtn.addEventListener("click", () => {
   const orig = texts.get(view);
   if (orig === undefined) return;
-  ed.focus({ preventScroll: true });
-  ed.select();
-  if (!document.execCommand("insertText", false, orig)) { ed.value = orig; ed.dispatchEvent(new Event("input")); }
-  ed.setSelectionRange(0, 0);
-  ed.scrollTop = ed.scrollLeft = 0;
-  sync();
-  showPos();
+  editor.replace(orig);
+  editor.goTo(1, 1);
 });
 // An address typed or pasted over this page's: an example opens here, a
 // link's code goes through the start-up below.
@@ -491,7 +308,7 @@ async function shortLink(src: string, q: string): Promise<string> {
 }
 shareBtn.addEventListener("click", async () => {
   const q = opt.value !== "0" ? `opt=${opt.value}` : "";
-  const src = ed.value;
+  const src = editor.text();
   const link = shortLink(src, q).catch(() => pack(src).then((frag) => `${location.origin}${BASE}#${frag}${q ? `&${q}` : ""}`));
   const copied = await copyText(link);
   let url: string;
@@ -635,8 +452,7 @@ function parseDiags(text: string): Diag[] {
 
 // Diagnostics in the output, coloured as nabic colours them in a terminal.
 function showErrors(text: string): void {
-  diags = parseDiags(text);
-  paint();
+  setDiags(parseDiags(text));
   for (const line of text.replace(/\n+$/, "").split("\n")) {
     let m;
     if ((m = line.match(/^(error|warning)(\[\w+\])?(:.*)$/))) {
@@ -737,19 +553,42 @@ interface RunReply {
   old?: boolean;
 }
 
+// Modules the server has compiled, by level and source: the key it
+// answered in X-Nabi-Module (or a /p/<id> page named). A known one is
+// fetched by GET /api/wasm/<key>, which the browser and the CDN keep,
+// instead of a compile request.
+const modules = new Map<string, string>();
+const moduleOf = (o: string, src: string): string => `${o}\n${src}`;
+// The module at `key` when the server still has it, else null.
+async function knownModule(key: string, signal: AbortSignal): Promise<ArrayBuffer | null> {
+  try {
+    const res = await fetch(`/api/wasm/${key}`, { signal });
+    return res.ok && res.headers.get("Content-Type") === "application/wasm" ? await res.arrayBuffer() : null;
+  } catch {
+    return null;
+  }
+}
+
 async function run(auto = false): Promise<void> {
   finish();
   const me = gen;
   clearOut();
-  diags = [];
-  hideTip();
-  paint();
+  setDiags([]);
   busy(true);
   say(T.compiling);
   step("Compiling", `main.nabi (wasm32, -O${opt.value})`);
   if (!auto) reveal();
-  const src = ed.value;
+  const src = editor.text();
   let t0 = performance.now();
+  const key = modules.get(moduleOf(opt.value, src));
+  if (key) {
+    aborter = new AbortController();
+    const wasm = await knownModule(key, aborter.signal);
+    if (me !== gen) return;
+    aborter = null;
+    if (wasm) { start(me, wasm, true, performance.now() - t0); return; }
+    modules.delete(moduleOf(opt.value, src));
+  }
   let res: Response, body: ArrayBuffer | string;
   // A busy server (503) is asked again after its Retry-After, doubling,
   // up to RETRIES times; Stop ends the wait.
@@ -780,6 +619,8 @@ async function run(auto = false): Promise<void> {
   aborter = null;
   const cached = res.headers.get("X-Nabi-Cache") === "hit";
   const took = performance.now() - t0;
+  const made = res.headers.get("X-Nabi-Module");
+  if (made && /^[0-9a-f]{64}$/.test(made)) modules.set(moduleOf(opt.value, src), made);
   if (!res.ok) {
     finish();
     say(`HTTP ${res.status}`, "bad");
@@ -793,6 +634,12 @@ async function run(auto = false): Promise<void> {
     say(n ? T.errors(n) : T.failed, "bad");
     return;
   }
+  start(me, body, cached, took);
+}
+
+// Runs the module: the rest of a run once it is here.
+function start(me: number, body: ArrayBuffer, cached: boolean, took: number): void {
+  if (me !== gen) return;
   step("Finished", cached ? "cached build" : `in ${secs(took)}`);
   step("Running", "main.wasm");
   print("\n");
@@ -826,7 +673,7 @@ async function run(auto = false): Promise<void> {
 }
 runBtn.addEventListener("click", () => { if (runBtn.dataset.running) stop(); else run(); });
 document.addEventListener("keydown", (ev) => {
-  if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter" && ev.target !== ed) { ev.preventDefault(); run(); }
+  if ((ev.metaKey || ev.ctrlKey) && ev.key === "Enter" && !editor.view.dom.contains(ev.target as Node | null)) { ev.preventDefault(); run(); }
 });
 busy(false);
 
@@ -834,7 +681,7 @@ busy(false);
 // The new text goes in as one edit, so Undo brings the old back.
 const fmtBtn = $<HTMLButtonElement>("fmt");
 fmtBtn.addEventListener("click", async () => {
-  const src = ed.value;
+  const src = editor.text();
   if (!src.trim()) return;
   fmtBtn.disabled = true;
   let res: Response, body: string;
@@ -847,7 +694,7 @@ fmtBtn.addEventListener("click", async () => {
     return;
   }
   fmtBtn.disabled = false;
-  if (ed.value !== src) return;
+  if (editor.text() !== src) return;
   if (!res.ok) { say(failure(res, body), "bad"); return; }
   if (res.headers.has("X-Nabi-Diagnostics")) {
     finish();
@@ -857,18 +704,7 @@ fmtBtn.addEventListener("click", async () => {
     return;
   }
   if (body === src) { say(T.alreadyFormatted); return; }
-  const { line, col } = caretAt(ed.selectionStart);
-  const top = ed.scrollTop;
-  ed.focus({ preventScroll: true });
-  ed.select();
-  if (!document.execCommand("insertText", false, body)) { ed.value = body; ed.dispatchEvent(new Event("input")); }
-  const lines = body.split("\n");
-  let i = 0;
-  for (let k = 0; k < line - 1 && k < lines.length; k++) i += lines[k]!.length + 1;
-  i += Math.min(col - 1, (lines[line - 1] || "").length);
-  ed.setSelectionRange(i, i);
-  ed.scrollTop = top;
-  sync();
+  editor.replace(body);
   say(T.formatted);
 });
 
@@ -927,13 +763,16 @@ for (const a of document.querySelectorAll<HTMLAnchorElement>("a[data-lang], .lan
 }
 
 // The skip link puts the caret in the editor, not just the scroll.
-document.querySelector(".skip")!.addEventListener("click", (ev) => { ev.preventDefault(); ed.focus(); });
+document.querySelector(".skip")!.addEventListener("click", (ev) => { ev.preventDefault(); editor.focus(); });
 
 // Start: the visitor's code (or Hello world), then a link's code (a
 // /p/<id> page carries it in #shared) or a #example=<name>. A link
 // replaces "mine" only while mine is empty or untouched Hello world.
 
 (async () => {
+  try { await startUp(); } finally { editor.setReadOnly(false); }
+})();
+async function startUp(): Promise<void> {
   const om = location.hash.match(/[#&]opt=([02])/);
   if (om) opt.value = om[1]!;
   const was = store.get("play.view");
@@ -948,7 +787,14 @@ document.querySelector(".skip")!.addEventListener("click", (ev) => { ev.preventD
   const m = location.hash.match(/^#(code|src)=([\w-]+)/);
   const ex = exampleIn(location.hash);
   let text: string | null = null, open = was === "link" && linked !== null ? "link" : "mine";
-  if (pre) text = pre.textContent;
+  if (pre) {
+    text = pre.textContent;
+    // the modules the server already has for it
+    for (const o of ["0", "2"]) {
+      const k = pre.dataset[`wasm${o}`];
+      if (k && /^[0-9a-f]{64}$/.test(k)) modules.set(moduleOf(o, text ?? ""), k);
+    }
+  }
   else if (m) {
     if (m[1] === "code" && !can("DecompressionStream")) say(T.linkTooNew, "bad");
     else try { text = await unpack(m[1]!, m[2]!); } catch { say(T.linkDamaged, "bad"); }
@@ -965,13 +811,13 @@ document.querySelector(".skip")!.addEventListener("click", (ev) => { ev.preventD
   if (/^#example=/.test(location.hash) && !ex) history.replaceState(null, "", BASE);
   if (text === null && ex) { await showExample(ex); return; }
   if (open === "link") show(linked!, "link");
-  else if (ed.value !== mine || view !== "mine") show(mine, "mine");
+  else if (editor.text() !== mine || view !== "mine") show(mine, "mine");
   else syncPick();
   // An example shows what it prints straight away; the visitor's own
   // code and a link's wait for Run.
   if (pick.value !== "mine" && pick.value !== "link") run(true);
   else if (!out.childNodes.length) { hint = true; drawOut(); }
-})();
+}
 
 // A draggable divider resizes the editor vs the output (desktop only).
 const divider = document.querySelector<HTMLElement>(".divider");
@@ -1002,7 +848,6 @@ if (divider && panes) {
       divider.removeEventListener("pointermove", move);
       divider.removeEventListener("pointerup", up);
       panes.classList.remove("dragging");
-      hideTip();
       save();
     };
     divider.addEventListener("pointermove", move);

@@ -154,78 +154,87 @@ select.tb.mono { font-size: 12px; }
 .nb .divider:focus-visible { outline: none; }
 .ws.dragging { cursor: col-resize; -webkit-user-select: none; user-select: none; }
 
-/* The editor: a transparent textarea over its highlighted copy, with a
-   layer for diagnostic underlines in between. */
-.ed { flex: 1; min-height: 0; display: flex; background: var(--code); }
-.gutter {
-  margin: 0;
-  padding: var(--ed-pad) 0;
-  min-width: 3.4em;
-  overflow: hidden;
-  list-style: none;
-  counter-reset: ln;
-  text-align: right;
-  font-size: var(--ed-font);
-  line-height: var(--ed-line);
-  color: var(--gutter-ink);
-  -webkit-user-select: none;
-  user-select: none;
-  box-sizing: border-box;
-}
-.gutter li { counter-increment: ln; height: var(--ed-line); padding: 0 14px 0 10px; }
-.gutter li::before { content: counter(ln); }
-.gutter li.bad { color: var(--err); }
-.gutter li.warn { color: var(--warn); }
-.ed-body { position: relative; flex: 1; min-width: 0; }
-.ed-body .hl, .ed-body .sqs, .ed-body textarea {
-  position: absolute;
-  inset: 0;
-  margin: 0;
-  padding: var(--ed-pad) 16px var(--ed-pad) 4px;
-  border: 0;
-  border-radius: 0;
-  font-size: var(--ed-font);
-  line-height: var(--ed-line);
-  tab-size: 4;
-  white-space: pre;
-  overflow: auto;
-  box-sizing: border-box;
-}
-.ed-body .hl, .ed-body .sqs { pointer-events: none; overflow: hidden; color: var(--ink); background: none; }
-.ed-body .hl code { font: inherit; }
-.ed-body .sqs { color: transparent; }
-.sqs .sq { text-decoration: underline wavy var(--err); text-decoration-thickness: 1.5px; text-underline-offset: 4px; text-decoration-skip-ink: none; }
-.sqs .sq.w { text-decoration-color: var(--warn); }
-.ed-body textarea { resize: none; background: transparent; color: transparent; caret-color: var(--ink); outline: none; }
-.ed-body textarea::selection { background: var(--sel); color: transparent; }
-.nb .ed-body textarea:focus-visible { outline: none; }
+/* The editor: CodeMirror (static/editor/), its own base styles put in
+   this sheet ahead of these (editor/style.ts), so these win. Colours
+   are the site's tokens, so both themes follow. */
+.ed { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--code); }
+.ed .cm-editor { flex: 1; min-height: 0; height: 100%; background: var(--code); color: var(--ink); font-size: var(--ed-font); }
+.ed .cm-editor.cm-focused { outline: none; }
+.ed .cm-scroller { font-family: var(--mono); line-height: var(--ed-line); overflow: auto; }
+.ed .cm-content { padding: var(--ed-pad) 0; caret-color: var(--ink); tab-size: 4; }
+.ed .cm-line { padding: 0 16px 0 4px; }
+.ed .cm-cursor, .ed .cm-dropCursor { border-left: 2px solid var(--ink); }
+.ed .cm-selectionBackground, .ed .cm-editor.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground { background: var(--sel); }
+.ed .cm-content ::selection { background: var(--sel); }
+.ed .cm-activeLine { background: transparent; }
+.ed .cm-editor.cm-focused .cm-activeLine { background: rgb(128 128 128 / .06); }
+.ed .cm-gutters { background: var(--code); color: var(--gutter-ink); border: 0; -webkit-user-select: none; user-select: none; }
+.ed .cm-lineNumbers .cm-gutterElement { min-width: 2.4em; padding: 0 6px 0 10px; }
+.ed .cm-activeLineGutter { background: transparent; color: var(--ink-2); }
+.ed .cm-gutterElement.bad { color: var(--err); }
+.ed .cm-gutterElement.warn { color: var(--warn); }
+.ed .cm-foldGutter .cm-gutterElement { width: 14px; padding-right: 4px; color: var(--ink-3); cursor: pointer; }
+.ed .cm-foldGutter .fold { opacity: 0; }
+.ed .cm-gutters:hover .fold, .ed .fold:not(.open) { opacity: 1; }
+.ed .cm-foldPlaceholder { margin: 0 2px; padding: 0 4px; border: 1px solid var(--line-2); border-radius: 4px; background: var(--bg-2); color: var(--ink-2); }
+.ed .cm-matchingBracket, .ed .cm-editor.cm-focused .cm-matchingBracket { background: var(--sel); outline: 1px solid var(--ink-3); outline-offset: -1px; border-radius: 2px; color: inherit; }
+.ed .cm-nonmatchingBracket, .ed .cm-editor.cm-focused .cm-nonmatchingBracket { background: none; color: var(--err); }
+.ed .cm-selectionMatch { background: rgb(128 128 128 / .16); }
+.ed .cm-searchMatch { background: rgb(229 167 0 / .25); outline: 1px solid rgb(229 167 0 / .6); }
+.ed .cm-searchMatch-selected { background: rgb(229 167 0 / .5); }
+/* nabic's diagnostics: a wavy underline, as the old editor drew it */
+.ed .cm-lintRange-error, .ed .cm-lintRange-warning { background: none; text-decoration: underline wavy var(--err); text-decoration-thickness: 1.5px; text-underline-offset: 4px; text-decoration-skip-ink: none; }
+.ed .cm-lintRange-warning { text-decoration-color: var(--warn); }
+.ed .cm-lintPoint::after { border-bottom-color: var(--err); }
+.ed .cm-lintPoint-warning::after { border-bottom-color: var(--warn); }
 
-/* A diagnostic, under the code it is about. */
+/* The search and lint panels: the site's fields and buttons. */
+.ed .cm-panels { background: var(--bg-2); color: var(--ink); border-color: var(--line); font-family: var(--sans, inherit); font-size: 13px; }
+.ed .cm-panels-top { border-bottom: 1px solid var(--line); }
+.ed .cm-panels-bottom { border-top: 1px solid var(--line); }
+.ed .cm-panel.cm-search { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; padding: 8px 36px 8px 12px; }
+.ed .cm-panel.cm-search br { display: none; }
+.ed .cm-panel.cm-search label { display: inline-flex; align-items: center; gap: 4px; margin: 0; font-size: 12px; color: var(--ink-2); }
+.ed .cm-textfield { height: 28px; margin: 0; padding: 0 8px; box-sizing: border-box; border: 1px solid var(--field-line); border-radius: 6px; background: var(--panel); color: var(--ink); font: inherit; font-family: var(--mono); font-size: 12px; }
+.ed .cm-textfield:focus { outline: 2px solid var(--acc); outline-offset: -1px; }
+.ed .cm-button { height: 28px; margin: 0; padding: 0 10px; border: 1px solid var(--field-line); border-radius: 6px; background: var(--panel); background-image: none; color: var(--ink); font: inherit; font-size: 12px; cursor: pointer; }
+.ed .cm-button:hover { border-color: var(--ink-3); }
+.ed .cm-panel button[name="close"] { top: 8px; right: 10px; color: var(--ink-3); font-size: 18px; }
+.ed .cm-panel.cm-panel-lint ul { max-height: 30vh; }
+.ed .cm-panel.cm-panel-lint ul [aria-selected] { background: var(--acc-bg); }
+.ed .cm-panel.cm-panel-lint ul:focus [aria-selected] { background: var(--acc-bg); color: var(--ink); }
+.ed .cm-panel.cm-panel-lint .tip { padding: 2px 0; }
+
+/* Tooltips: a diagnostic, a hover's docs, the completions. */
+.ed .cm-tooltip { background: var(--panel); color: var(--ink); border: 1px solid var(--line-2); border-radius: 10px; box-shadow: 0 12px 32px -8px rgb(0 0 0 / .3); overflow: hidden; }
+.ed .cm-tooltip-hover, .ed .cm-tooltip-lint { max-width: min(480px, calc(100vw - 24px)); }
+.ed .cm-tooltip .cm-diagnostic { padding: 10px 12px; border-left: 0; margin: 0; }
+.ed .cm-tooltip .cm-diagnostic + .cm-diagnostic { border-top: 1px solid var(--line); }
+.ed .cm-diagnosticSource { display: none; }
+.ed .cm-tooltip-autocomplete > ul { font-family: var(--mono); font-size: 13px; max-height: 16em; }
+.ed .cm-tooltip-autocomplete > ul > li { padding: 2px 10px 2px 6px; line-height: 20px; }
+.ed .cm-tooltip-autocomplete > ul > li[aria-selected] { background: var(--acc-bg); color: var(--ink); }
+.ed .cm-completionDetail { margin-left: 10px; font-style: normal; color: var(--ink-3); }
+.ed .cm-completionMatchedText { text-decoration: none; color: var(--acc); }
+.ed .cm-completionIcon { width: 1.1em; padding-right: 4px; opacity: .7; }
+.ed .cm-tooltip.cm-completionInfo { max-width: min(420px, 60vw); padding: 0; }
+.cm-lsp-doc { padding: 10px 12px; font-size: 13px; line-height: 19px; }
+.cm-lsp-doc pre { margin: 0; font-family: var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.cm-lsp-doc p { margin: 8px 0 0; color: var(--ink-2); }
+.cm-lsp-doc pre + p, .cm-lsp-doc p:first-child { margin-top: 0; }
+.cm-lsp-doc pre + p { margin-top: 8px; }
+.cm-lsp-doc code { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+
+/* A diagnostic: the kind and headline, then a line a note. */
 .tip {
-  position: absolute;
-  z-index: 3;
-  width: max-content;
-  max-width: min(420px, calc(100% - 24px));
-  box-sizing: border-box;
-  padding: 10px 12px;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  background: var(--panel);
-  border: 1px solid var(--line-2);
-  border-radius: 10px;
-  box-shadow: 0 12px 32px -8px rgb(0 0 0 / .3);
   font-family: var(--mono);
   font-size: 13px;
   line-height: 19px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  pointer-events: none;
-}
-.tip[hidden] { display: none; opacity: 0; }
-@media (prefers-reduced-motion: no-preference) {
-  .tip { transition: opacity var(--dur-out) var(--ease), display var(--dur-out) allow-discrete; }
-  @starting-style { .tip { opacity: 0; } }
 }
 .tip .h b { color: var(--err); font-weight: 600; }
 .tip .h.w b { color: var(--warn); }
@@ -329,17 +338,20 @@ select.tb.mono { font-size: 12px; }
   .hdr { position: sticky; top: 0; z-index: 5; }
 }
 /* nabi.css makes fields 16px here (iOS zooms into smaller ones); the
-   editor's layers and the toolbar follow. */
+   editor and the toolbar follow. */
 @media (max-width: 767px) {
   .nb { --ed-font: 16px; --ed-line: 25px; }
   .tb, select.tb.mono, .run, .tools .btn-2 { font-size: 16px; height: 36px; }
   .ib.theme, .more > summary { width: 36px; height: 36px; }
   .sharebar { flex-wrap: wrap; padding: 8px 12px; }
   .sharebar input { flex-basis: 100%; order: 3; height: 36px; font-size: 16px; }
+  .ed .cm-textfield { height: 36px; font-size: 16px; }
+  .ed .cm-button { height: 36px; font-size: 14px; }
+  .ed .cm-foldGutter { display: none; }
 }
 /* Print: the code and its output; no toolbar, share bar or tips. */
 @media print {
-  .hdr, #sharebar, .tip { display: none !important; }
+  .hdr, #sharebar, .cm-tooltip, .cm-panels { display: none !important; }
 }
 
 /* Standard input: a box between the output's bar and the output, open

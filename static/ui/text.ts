@@ -61,6 +61,7 @@ const EN = {
   hint: "Press Run to compile main.nabi and run it here.",
   goTo: (line: number, col: number): string => `Go to line ${line}, column ${col}`,
   displayAlt: "Output of display()",
+  definedAt: (line: number, text: string): string => `Definition, line ${line}: ${text}`,
 };
 
 const KO_TEXT: typeof EN = {
@@ -116,6 +117,7 @@ const KO_TEXT: typeof EN = {
   hint: "실행을 누르면 main.nabi를 컴파일해 여기서 실행합니다.",
   goTo: (line, col) => `${line}번째 줄, ${col}번째 열로 가기`,
   displayAlt: "display()의 출력",
+  definedAt: (line, text) => `정의, ${line}번째 줄: ${text}`,
 };
 
 export const T = KO ? KO_TEXT : EN;

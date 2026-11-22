@@ -67,17 +67,9 @@
 <main class="ws" id="content">
 <h1 class="sr-only">Nabi Playground</h1>
 <section class="pane ed-pane" aria-label="Source">
-<div class="ph"><span class="file mono">main.nabi</span><button class="lk" type="button" id="reset" hidden title="Put the example back as it was (Undo brings your edits back)">Reset example</button></div>
-<div class="ed">
-<ol class="gutter mono" aria-hidden="true"></ol>
-<div class="ed-body">
-<pre class="hl mono" aria-hidden="true"><code></code></pre>
-<pre class="sqs mono" aria-hidden="true"></pre>
-<textarea id="editor" class="mono" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" aria-label="Nabi source, main.nabi" aria-describedby="ed-help diag" wrap="off"></textarea>
-<p id="ed-help" hidden>Tab indents. Press Escape, then Tab, to leave the editor.</p>
-<div class="tip" id="tip" role="tooltip" hidden></div>
-</div>
-</div>
+<div class="ph"><span class="file mono" id="ed-label"><span class="sr-only">Nabi source, </span>main.nabi</span><button class="lk" type="button" id="reset" hidden title="Put the example back as it was (Undo brings your edits back)">Reset example</button></div>
+<div class="ed mono" id="editor"></div>
+<p id="ed-help" hidden>Tab indents. Press Escape, then Tab, to leave the editor. Ctrl+Space suggests names, F12 goes to a definition, Ctrl+F finds and replaces, Ctrl+/ comments lines out, F8 goes to the next problem.</p>
 <div class="sb t-small"><span id="pos">Ln 1, Col 1</span><button class="dg" type="button" id="diag" hidden></button></div>
 </section>
 <div class="divider" role="separator" aria-orientation="vertical" aria-label="Resize the panes" aria-valuemin="25" aria-valuemax="75" aria-valuenow="60" tabindex="0"></div>
