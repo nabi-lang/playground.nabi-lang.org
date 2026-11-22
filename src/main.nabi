@@ -128,6 +128,10 @@ struct Cfg {
     /// The toolchain's release (`nabic --version`), put in place of
     /// index.html's `nabi dev`.
     release: str;
+    /// static/ts/'s files with their versions, `name=version,..` (the
+    /// page's nabi-ts meta): the files only change with a deploy, which
+    /// restarts the server, so they are hashed once.
+    ts: str = "";
 }
 
 fn setting(k: str, dflt: str) -> str {
@@ -170,7 +174,7 @@ fn load_cfg() throws -> Cfg {
     let rate = try setting("PLAY_RATE", "30").parse::<i64>();
     let share_rate = try setting("PLAY_SHARE_RATE", "10").parse::<i64>();
     let share_max = try setting("PLAY_SHARE_MAX", "100000").parse::<i64>();
-    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), share_rate: share_rate, share_max: share_max, queue: queue, deps: setting("PLAY_DEPS", ""), packages: setting("PLAY_PACKAGES", packages_of(setting("PLAY_DEPS", ""))), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic) }
+    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), share_rate: share_rate, share_max: share_max, queue: queue, deps: setting("PLAY_DEPS", ""), packages: setting("PLAY_PACKAGES", packages_of(setting("PLAY_DEPS", ""))), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic), ts: ts_versions() }
 }
 
 /// The packages warm.sh built into `deps` (its `packages` file, when
@@ -816,13 +820,40 @@ fn page_in(cfg: Cfg, path: str, at: str, ko: bool) -> Resp | none {
 }
 
 /// The stylesheets and scripts a page names, as `"/x?v=<version>"`, so
-/// a browser keeps each until it changes.
+/// a browser keeps each until it changes; and the versions of the
+/// highlighting's files (highlight.ts reads them from the meta).
 fn stamp(cfg: Cfg, html: str) -> str {
     let out = html;
     for p in ["/nabi.css", "/play.css", "/theme.js", "/play.js"] {
         if let x: Resp = asset(cfg, p) { out = out.replace(f"\"{p}\"", f"\"{p}?v={http::version(x.body)}\""); }
     }
-    out
+    out.replace("<meta name=\"nabi-ts\" content=\"\">", f"<meta name=\"nabi-ts\" content=\"{cfg.ts}\">")
+}
+
+/// Cfg::ts, from static/ts/.
+fn ts_versions() -> str {
+    let ts: List<str> = List::new();
+    for n in TS_FILES {
+        if let x: Resp = file_resp("static/ts/" + n) { ts.push(f"{n}={http::version(x.body)}"); }
+    }
+    ts.join(",")
+}
+
+/// The highlighting's files under static/ts/ (highlight.ts).
+const TS_FILES: [str; 3] = ["tree-sitter-nabi.wasm", "highlights.scm", "web-tree-sitter.wasm"];
+
+/// A script that loads another by its address, with that address
+/// versioned: play.js starts /run.js and /highlight.js, run.js imports
+/// /nabi.mjs. A script's version then changes with what it loads.
+fn chained(cfg: Cfg, p: str, x: Resp) -> Resp {
+    let names: List<str> = if p == "/play.js" { ["/run.js", "/highlight.js"] } else if p == "/run.js" { ["/nabi.mjs"] } else { return x; };
+    let body = try str::from_utf8(x.body[0:x.body.len()]) catch _ { return x; };
+    for n in names {
+        let dep = if n == "/nabi.mjs" { if cfg.mjs.is_empty() { none } else { file_resp(cfg.mjs) } } else { asset(cfg, n) };
+        if let d: Resp = dep { body = body.replace(f"\"{n}\"", f"\"{n}?v={http::version(d.body)}\""); }
+    }
+    x.body = bytes_of(body);
+    x
 }
 
 /// The file under `root` that canonical path `p` names, as a page.
@@ -836,24 +867,20 @@ fn site_file(cfg: Cfg, root: str, p: str) -> Resp | none {
 fn asset(cfg: Cfg, p: str) -> Resp | none {
     // the TypeScript the page scripts are built from is not served
     let own: Resp | none = if kit::is_source(p.trim_start_matches("/")) { none } else { site_file(cfg, "static", p) };
-    own ?? kit_resp(p) ?? font_resp(p) ?? site_file(cfg, cfg.site, p)
+    let x = own ?? kit_resp(p) ?? font_resp(p) ?? site_file(cfg, cfg.site, p) ?? { return none; };
+    chained(cfg, p, x)
 }
 
-/// A file answer's caching: a page for five minutes, the kit's fonts
-/// (unversioned names) for a day, a file asked for by its current `?v=`
-/// for a year, anything else revalidated each time; always an ETag of
-/// the content, and 304 when the client holds it.
+/// A file answer's caching: a file asked for by its current `?v=` for a
+/// year; a page and anything else checked on every load (http::FRESH),
+/// so a deploy shows at once while the CDN keeps them until its purge;
+/// always an ETag of the content, and 304 when the client holds it.
 fn cached(x: Resp, page: bool, r: Request) -> Resp {
     let tag = http::etag(x.body);
-    let cc = if page {
-        "Cache-Control: public, max-age=300"
-    } else if r.path.starts_with("/fonts/") {
-        "Cache-Control: public, max-age=86400"
-    } else if http::is_current(r.query, x.body) {
-        http::IMMUTABLE
-    } else {
-        http::REVALIDATE
-    };
+    // A page, and a file asked for without its current version: checked
+    // on every load, so a deploy shows at once (http::FRESH). A file at
+    // its current `?v=` never changes.
+    let cc = if !page && http::is_current(r.query, x.body) { http::IMMUTABLE } else { http::FRESH };
     // headers[1] is file_resp's and kit_resp's Cache-Control.
     x.headers[1] = cc;
     x.headers.push("ETag: " + tag);
@@ -1063,16 +1090,21 @@ fn caching() {
     let etag = c.headers[c.headers.len() - 1];
     expect(etag.starts_with("ETag: \"") && etag.len() == 24, "etag");
     let stale = cached(asset(cfg, "/play.js") ?? panic("js"), false, get("/play.js?v=0000000000", ""));
-    expect(stale.headers.contains("Cache-Control: no-cache"), "stale version revalidates");
+    expect(stale.headers.contains(http::FRESH), "stale version revalidates");
     let p = cached(page, true, get("/", ""));
-    expect(p.headers.contains("Cache-Control: public, max-age=300"), "page");
+    expect(p.headers.contains(http::FRESH), "page: checked on every load");
+    // play.js names /run.js and /highlight.js by their versions.
+    let run = asset(cfg, "/run.js") ?? panic("no run.js");
+    let hl = asset(cfg, "/highlight.js") ?? panic("no highlight.js");
+    expect(body_of(js).contains(f"\"/run.js?v={http::version(run.body)}\"") && body_of(js).contains(f"\"/highlight.js?v={http::version(hl.body)}\""), "chained versions");
+    expect(ts_versions().contains("tree-sitter-nabi.wasm=") && ts_versions().contains("highlights.scm="), "ts versions");
     let tag = etag["ETag: ".len():];
     let again = cached(asset(cfg, "/play.js") ?? panic("js"), false, get("/play.js", "W/" + tag + ", \"x\""));
     expect(again.status == 304 && again.body.len() == 0 && again.headers.contains("ETag: " + tag), "304");
     expect(cached(asset(cfg, "/play.js") ?? panic("js"), false, get("/play.js", "\"nope\"")).status == 200, "other etag");
     let font = asset(cfg, "/fonts/Geist-Variable.woff2") ?? panic("no font");
     expect(font.headers[0] == "Content-Type: font/woff2", "font type");
-    expect(cached(font, false, get("/fonts/Geist-Variable.woff2", "")).headers.contains("Cache-Control: public, max-age=86400"), "font cache");
+    expect(cached(font, false, get("/fonts/Geist-Variable.woff2", "")).headers.contains(http::FRESH), "font: unversioned, checked");
     expect((asset(cfg, "/fonts/pretendard.css") ?? panic("no pretendard.css")).headers[0] == "Content-Type: text/css; charset=utf-8", "pretendard.css");
     expect(asset(cfg, "/fonts/README.md") is none && asset(cfg, "/fonts/../nabi/nabi.nabion") is none, "fonts only");
     expect(body_of(page).contains("<link rel=\"preload\" href=\"/fonts/Geist-Variable.woff2\"") && !body_of(page).contains("googleapis") && !body_of(page).contains("jsdelivr"), "own fonts");

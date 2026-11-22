@@ -46,10 +46,22 @@ function point(text: string, i: number): Point {
   return { row, column: i - start };
 }
 
+// Each file of static/ts/ by its address with its version: the page's
+// <meta name="nabi-ts" content="name=version,..."> (main.nabi stamps it),
+// so a browser keeps each until it changes.
+function at(base: string, name: string): string {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="nabi-ts"]')?.content ?? "";
+  for (const kv of meta.split(",")) {
+    const [n, v] = kv.split("=");
+    if (n === name && v) return `${base}${name}?v=${v}`;
+  }
+  return base + name;
+}
+
 async function load(base: string): Promise<Highlighter> {
-  await Parser.init({ locateFile: (name: string) => base + name });
-  const lang = await Language.load(base + "tree-sitter-nabi.wasm");
-  const query = new Query(lang, await (await fetch(base + "highlights.scm")).text());
+  await Parser.init({ locateFile: (name: string) => at(base, name) });
+  const lang = await Language.load(at(base, "tree-sitter-nabi.wasm"));
+  const query = new Query(lang, await (await fetch(at(base, "highlights.scm"))).text());
   const parser = new Parser();
   parser.setLanguage(lang);
   const byName = new Map(query.captureNames.map((n) => [n, classOf(n)] as [string, number]));
