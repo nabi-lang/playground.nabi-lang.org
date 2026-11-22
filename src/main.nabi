@@ -317,22 +317,70 @@ fn allow(client: str, rate: i64) -> bool {
     }
 }
 
-/// The client for rate limiting. Without a trusted-proxy header the TCP
-/// peer is used, so a client cannot forge its identity; a direct client's
-/// own X-Forwarded-For is ignored. With one (PLAY_CLIENT_HEADER), its
-/// value is trusted, taking the LAST entry of a list header, which is the
-/// one the proxy appended (a client may prepend fakes, not append).
+/// The client for rate limiting, as rate_key groups it. Without a
+/// trusted-proxy header the TCP peer is used, so a client cannot forge
+/// its identity; a direct client's own X-Forwarded-For is ignored. With
+/// one (PLAY_CLIENT_HEADER), its value is trusted, taking the LAST entry
+/// of a list header, which is the one the proxy appended (a client may
+/// prepend fakes, not append).
 fn client_of(s: TcpStream, r: Request, header: str) -> str {
     if !header.is_empty() {
         let v = r.header(header);
         if !v.is_empty() {
-            if let k: usize = v.rfind(",") { return v[k + 1:].trim(); }
-            return v.trim();
+            if let k: usize = v.rfind(",") { return rate_key(v[k + 1:].trim()); }
+            return rate_key(v.trim());
         }
     }
     let a = try s.peer_addr() catch _ { return "?"; };
     let t = f"{a}";
-    if let k: usize = t.rfind(":") { t[:k] } else { t }
+    rate_key(if let k: usize = t.rfind(":") { t[:k] } else { t })
+}
+
+/// The address a client's budget is kept under: an IPv4 address as it
+/// is, an IPv6 one by its /64 (`2001:db8:1:2::/64`), since one host
+/// usually holds a whole /64 and could hop through it. An IPv4-mapped
+/// IPv6 address is its IPv4 one; anything unparsable stays as given.
+fn rate_key(ip: str) -> str {
+    let a = ip.trim_start_matches("[").trim_end_matches("]");
+    if let k: usize = a.find("%") { a = a[:k]; }
+    if !a.contains(":") { return a; }
+    let low = a.to_lowercase();
+    if low.starts_with("::ffff:") && low.contains(".") { return low["::ffff:".len():]; }
+    let groups: List<str> = List::new();
+    if let (head, tail) = low.split_once("::") {
+        if tail.contains("::") { return ip; }
+        let h = hextets(head) ?? { return ip; };
+        let t = hextets(tail) ?? { return ip; };
+        if h.len() + t.len() > 7 { return ip; }
+        for g in h { groups.push(g); }
+        for _ in 0..8 - h.len() - t.len() { groups.push("0"); }
+        for g in t { groups.push(g); }
+    } else {
+        groups = hextets(low) ?? { return ip; };
+        if groups.len() != 8 { return ip; }
+    }
+    f"{groups[0]}:{groups[1]}:{groups[2]}:{groups[3]}::/64"
+}
+
+/// The hextets of one side of an IPv6 address, leading zeros dropped;
+/// an embedded IPv4 tail counts as two. None when one is not hex.
+fn hextets(s: str) -> List<str> | none {
+    let out: List<str> = List::new();
+    if s.is_empty() { return out; }
+    for g in s.split(":") {
+        if g.contains(".") {
+            out.push("0");
+            out.push("0");
+            continue;
+        }
+        if g.is_empty() || g.len() > 4 { return none; }
+        for c in g.chars() {
+            if !"0123456789abcdef".contains(f"{c}") { return none; }
+        }
+        let t = g.trim_start_matches("0");
+        out.push(if t.is_empty() { "0" } else { t });
+    }
+    out
 }
 
 /// What the playground does not compile: reading files at compile time
@@ -1393,4 +1441,19 @@ fn health_answers() {
     expect(down.status == 503 && body_of(down) == "sandbox: no image x\n", body_of(down));
     expect(still.status == 503, "cached");
     expect(no.status == 503 && body_of(no) == "no nabi.mjs: pages cannot run programs\n", "no runner");
+}
+
+/// The rate limit keeps IPv4 clients apart and an IPv6 /64 together.
+#[test]
+fn rate_keys() {
+    expect(rate_key("203.0.113.7") == "203.0.113.7", "ipv4");
+    expect(rate_key("2001:db8:1:2:3:4:5:6") == "2001:db8:1:2::/64", rate_key("2001:db8:1:2:3:4:5:6"));
+    expect(rate_key("2001:DB8:0001:0002:aaaa::1") == "2001:db8:1:2::/64", "case, leading zeros");
+    expect(rate_key("2001:db8::1") == "2001:db8:0:0::/64" && rate_key("2001:db8:0:0:ffff::9") == "2001:db8:0:0::/64", "compressed");
+    expect(rate_key("2001:db8:1::") == "2001:db8:1:0::/64" && rate_key("::1") == "0:0:0:0::/64" && rate_key("::") == "0:0:0:0::/64", "edges");
+    expect(rate_key("[2001:db8:1:2::5]") == "2001:db8:1:2::/64" && rate_key("fe80::1%en0") == "fe80:0:0:0::/64", "brackets, zone");
+    expect(rate_key("::ffff:198.51.100.2") == "198.51.100.2", "mapped ipv4");
+    expect(rate_key("64:ff9b::198.51.100.2") == "64:ff9b:0:0::/64", "embedded ipv4");
+    expect(rate_key("2001:db8:1:2:3:4:5:6") != rate_key("2001:db8:1:3:3:4:5:6"), "other /64");
+    expect(rate_key("1::2::3") == "1::2::3" && rate_key("2001:db8:xyz::1") == "2001:db8:xyz::1" && rate_key("1:2:3") == "1:2:3" && rate_key("?") == "?", "unparsable as given");
 }

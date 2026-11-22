@@ -74,7 +74,7 @@ Environment variables:
 | `PLAY_TIMEOUT` | `20` | Seconds a compile may take; then the tool is killed and `PLAY_WRAP --kill` runs in its job directory |
 | `PLAY_DEPS` | (none) | The prebuilt packages, as nabic sees the path: `<PLAY_DEPS>/debug/deps/<name>.nabihir` for -O0, `release/` for -O2 (`scripts/warm.sh`); unset, programs use no packages |
 | `PLAY_PACKAGES` | `<PLAY_DEPS>/packages` (warm.sh writes it), else `json,linalg,autodiff,special,specfun=special,signal,units,stats,csv,csvio=csv,table,plot,ode,optimize,interpolate,spatial` | The packages under `PLAY_DEPS`, each after the ones it depends on; `alias=name` is `name` under another name (`stats` imports `special` as `specfun`, `table` imports `csv` as `csvio`). A program that names one gets them all as `--extern`; the page's note lists them, linked to the registry |
-| `PLAY_RATE` | `30` | Compiles a minute per client |
+| `PLAY_RATE` | `30` | Compiles a minute per client (an IPv4 address, or an IPv6 /64) |
 | `PLAY_SHARES` | `<PLAY_WORK>/shares` | Stored share links; must be writable and should outlive restarts |
 | `PLAY_SHARE_RATE` | `10` | Share links a minute per client |
 | `PLAY_SHARE_MAX` | `100000` | Share links kept; past it new ones are refused (Share falls back to `#code=`) |
