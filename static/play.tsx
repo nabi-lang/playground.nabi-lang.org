@@ -314,7 +314,12 @@ const store = {
 };
 const texts = new Map<string, string>();
 async function exampleText(file: string): Promise<string> {
-  if (!texts.has(file)) texts.set(file, await (await fetch(`/examples/${file}.nabi`)).text());
+  if (!texts.has(file)) {
+    // a proxy's error page is not an example
+    const res = await fetch(`/examples/${file}.nabi`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    texts.set(file, await res.text());
+  }
   return texts.get(file)!;
 }
 
@@ -367,7 +372,8 @@ function addLinkOption(): void {
 }
 // An example as last edited here, and what it prints.
 async function showExample(name: string): Promise<void> {
-  const orig = await exampleText(name);
+  let orig: string;
+  try { orig = await exampleText(name); } catch { say(T.down, "bad"); return; }
   show(store.get(`play.ex.${name}`) ?? orig, name);
   if (name === "input" && !stdinEd.value.trim()) { setStdin(SAMPLE_INPUT); stdinOpen(true); }
   run(true);
@@ -662,9 +668,24 @@ const RETRIES = 3;
 // Seconds to wait before asking a busy server again: its Retry-After
 // (else 5), doubled each time, at most 30.
 function retryAfter(res: Response, tries: number): number {
-  const s = parseInt(res.headers.get("Retry-After") ?? "", 10);
-  return Math.min(30, (s > 0 ? s : 5) * 2 ** tries);
+  return Math.min(30, (waitOf(res) || 5) * 2 ** tries);
 }
+// A Retry-After in seconds, or 0.
+function waitOf(res: Response): number {
+  const s = parseInt(res.headers.get("Retry-After") ?? "", 10);
+  return s > 0 ? s : 0;
+}
+// What a failed answer tells the reader: a busy server's wait, the
+// server's own text/plain message, else (a proxy's HTML error page when
+// the server is down) a fixed line, never the markup.
+function failure(res: Response, body: string): string {
+  const wait = res.status === 503 ? waitOf(res) : 0;
+  if (wait) return T.busyTryIn(wait);
+  const plain = (res.headers.get("Content-Type") ?? "").startsWith("text/plain");
+  return plain && body.trim() ? body.trim() : T.down;
+}
+// The status for a request that got no answer at all.
+const noAnswer = (): string => navigator.onLine === false ? T.offline : T.noAnswer;
 
 function busy(on: boolean): void {
   if (on && !runBtn.dataset.running) runBtn.style.minWidth = `${runBtn.offsetWidth}px`;
@@ -737,8 +758,8 @@ async function run(auto = false): Promise<void> {
     } catch {
       if (me !== gen) return;
       finish();
-      say(T.offline, "bad");
-      print(`${T.unreachable}\n`, "err");
+      say(noAnswer(), "bad");
+      print(`${T.down}\n`, "err");
       return;
     }
     if (me !== gen) return;
@@ -759,8 +780,7 @@ async function run(auto = false): Promise<void> {
   if (!res.ok) {
     finish();
     say(`HTTP ${res.status}`, "bad");
-    print((body as string).replace(/\n*$/, "\n"), "err");
-    if (res.status === 503) print(`${T.busyGaveUp}\n`, "warn", true);
+    print(`${failure(res, body as string)}\n`, "err");
     return;
   }
   if (typeof body === "string") {
@@ -819,13 +839,13 @@ fmtBtn.addEventListener("click", async () => {
     res = await fetch("/api/fmt", { method: "POST", body: src, headers: { "Content-Type": "text/plain; charset=utf-8" } });
     body = await res.text();
   } catch {
-    say(T.offline, "bad");
+    say(noAnswer(), "bad");
     fmtBtn.disabled = false;
     return;
   }
   fmtBtn.disabled = false;
   if (ed.value !== src) return;
-  if (!res.ok) { say(body.trim() || `HTTP ${res.status}`, "bad"); return; }
+  if (!res.ok) { say(failure(res, body), "bad"); return; }
   if (res.headers.has("X-Nabi-Diagnostics")) {
     finish();
     clearOut();
@@ -919,7 +939,7 @@ document.querySelector(".skip")!.addEventListener("click", (ev) => { ev.preventD
   if (mine) { store.set("play.mine", mine); show(mine, "mine"); }
   linked = store.get("play.link");
   if (linked !== null) addLinkOption();
-  const hello = await exampleText("hello");
+  const hello = await exampleText("hello").catch(() => "");
   // only on a /p/<id> page
   const pre = document.getElementById("shared");
   const m = location.hash.match(/^#(code|src)=([\w-]+)/);
