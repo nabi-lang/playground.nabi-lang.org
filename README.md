@@ -78,6 +78,7 @@ Environment variables:
 | `PLAY_SHARES` | `<PLAY_WORK>/shares` | Stored share links; must be writable and should outlive restarts |
 | `PLAY_SHARE_RATE` | `10` | Share links a minute per client |
 | `PLAY_SHARE_MAX` | `100000` | Share links kept; past it new ones are refused (Share falls back to `#code=`) |
+| `PLAY_TAKEDOWN` | `<PLAY_SHARES>/takedown` | Share links taken down, one a line (see Takedowns) |
 | `PLAY_CLIENT_HEADER` | (none) | The header a trusted proxy puts the client address in (`cf-connecting-ip`, `x-forwarded-for`); unset, the TCP peer is the client |
 
 The compile API is `POST /api/compile?opt=0` (or `opt=2`) (body: UTF-8 source, max 64 KiB) returning `application/wasm`, or nabic's diagnostics as text with an `X-Nabi-Diagnostics: 1` header (both 200; 4xx/5xx only for the request itself). `POST /api/fmt` takes the same body and returns it as `nabi fmt` lays it out (run in a job directory under `PLAY_WRAP`, like a build, stopped after 5 s), or its diagnostics the same way. `POST /api/share` takes the same body and returns the short link's id (`GET /api/share/<id>` gives the source back, `/p/<id>` the page); see `src/main.nabi`. `GET /api/health` answers `ok` and the server's state (see Operations). Other paths answer 404 with `static/404.html`.
@@ -112,6 +113,21 @@ Run the server with `PLAY_DEPS=/opt/nabi-play/target/wasm32-unknown-unknown` and
 - Logs: one line a request on stderr, `<method> <path> <status> <bytes>B <ms>ms`, plus CSP reports (`csp: ...`) and notes at start; run under systemd, they go to the journal (`journalctl -u <service>`). Ship them with whatever the host already uses; 503s (`busy`) and 504s (timeouts) in a row mean `PLAY_JOBS` is too low for the traffic.
 - Capacity: with the warm cache a hello compiles in about 0.3 s on an idle machine (1.5 s on a busy 8-core one under bwrap), a program using packages in 2-4 s; each compile holds one of `PLAY_JOBS` slots, and a request waits up to `PLAY_QUEUE` seconds for one before a 503 with `Retry-After`, which the page honours: it says the server is busy and asks again after the delay, doubling, three times.
 - Cache: compiled modules live in `<PLAY_WORK>/cache`, at most 256; past that the least recently used quarter goes. Share links in `PLAY_SHARES` are never evicted; back that directory up.
+
+### Takedowns
+
+A shared link is taken down by adding its id (or its `/p/<id>` link) to the `PLAY_TAKEDOWN` file, one a line; blank lines and `#` comments are skipped. The server looks at the file's size and time every 2 s and reads it again when they change, so no restart is needed. A taken-down share answers 410: `/p/<id>` with a short page saying so, `/api/share/<id>` in plain text, and sharing the same code again gets no short link. The stored file stays where it is, for the record; delete it from `PLAY_SHARES` as well to remove the code from the server for good.
+
+Requests to take a link down (code that is not the sharer's to share, personal data, abuse) go to privacy@nabi-lang.org with the link; the page that replaces a removed share names that address.
+
+### The share cap
+
+`PLAY_SHARE_MAX` (100,000) is a hard cap today: past it new links are refused and Share falls back to `#code=` links. The plan, for when the cap comes near, is to keep links people still open and let the rest go:
+
+1. Record each share's last visit: on `GET /p/<id>` or `/api/share/<id>`, set the stored file's modification time to now, at most once a day per file (the content is never rewritten, so its time is free to mean "last visited"; creation sets it too).
+2. When a new share would pass the cap, evict the oldest-visited shares beyond it, in a batch (the oldest 1% or so), as the module cache does, so eviction is rare and cheap. Their links answer 404 like any unknown id.
+3. Never evict a share visited in the last 90 days, or one listed in a `keep` file beside the takedown list; if nothing can go, refuse as today.
+4. Say so on the page: the note under the output would read that short links unused for a long time may expire, and `#code=` links never do.
 
 ## Layout
 

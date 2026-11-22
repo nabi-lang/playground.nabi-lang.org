@@ -13,7 +13,8 @@
 //                               link that holds the source, stored
 //                               under PLAY_SHARES (never compiled or
 //                               run here); 400 / 409 / 413 / 429 / 503.
-//   GET  /api/share/<id>        the stored source, or 404
+//   GET  /api/share/<id>        the stored source, or 404 (410 when
+//                               PLAY_TAKEDOWN names it)
 //   GET  /p/<id>                the page with that source in the editor
 //   GET  /api/wasm/<sha256>     a module already in the cache, by the key
 //                               a compile answered in X-Nabi-Module;
@@ -57,6 +58,8 @@
 //   PLAY_SHARES   <PLAY_WORK>/shares: stored share links, one file each
 //   PLAY_SHARE_RATE  10 (share links per minute and client)
 //   PLAY_SHARE_MAX   100000 (links kept; past it, new ones are refused)
+//   PLAY_TAKEDOWN    <PLAY_SHARES>/takedown: share ids taken down, one a
+//                 line; re-read when it changes
 //   PLAY_CLIENT_HEADER  (none)  the header a trusted proxy sets with the
 //                 real client IP, e.g. cf-connecting-ip behind Cloudflare
 //                 or x-forwarded-for behind Caddy. Unset (the default),
@@ -128,6 +131,8 @@ struct Cfg {
     shares: str;
     share_rate: i64;
     share_max: i64;
+    /// The takedown list's path (PLAY_TAKEDOWN).
+    takedown: str = "";
     /// The og:image version: the first 10 hex digits of og.png's SHA-256,
     /// put in place of index.html's `og.png?v=dev` when it is served.
     og: str;
@@ -185,7 +190,7 @@ fn load_cfg() throws -> Cfg {
     let share_max = try setting("PLAY_SHARE_MAX", "100000").parse::<i64>();
     let deps = setting("PLAY_DEPS", "");
     let packages = setting("PLAY_PACKAGES", packages_of(deps));
-    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), share_rate: share_rate, share_max: share_max, queue: queue, deps: deps, packages: packages, examples_off: examples_off(deps, packages), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic), ts: ts_versions() }
+    Cfg { addr: setting("PLAY_ADDR", "127.0.0.1:8405"), nabic: nabic, nabi: setting("PLAY_NABI", find_nabi(nabic)), site: setting("PLAY_SITE", "../nabi-lang.org/static"), mjs: mjs, wrap: try env::var("PLAY_WRAP") catch _ { "" }, work: work, jobs: jobs, timeout: timeout, rate: rate, client_header: setting("PLAY_CLIENT_HEADER", "").to_lowercase(), shares: setting("PLAY_SHARES", work + "/shares"), takedown: setting("PLAY_TAKEDOWN", setting("PLAY_SHARES", work + "/shares") + "/takedown"), share_rate: share_rate, share_max: share_max, queue: queue, deps: deps, packages: packages, examples_off: examples_off(deps, packages), og: og_version(["static", setting("PLAY_SITE", "../nabi-lang.org/static")]), release: nabic_release(nabic), ts: ts_versions() }
 }
 
 /// The packages warm.sh built into `deps` (its `packages` file, when
@@ -837,6 +842,7 @@ fn valid_id(id: str) -> bool {
 /// hash collision) is refused, so the page falls back to a #code link.
 fn share(cfg: Cfg, src: str) -> Resp {
     let id = share_id(src);
+    if taken_down(cfg, id) { return text(410, "This code was taken down, so it gets no short link."); }
     let path = cfg.shares + "/" + id + ".nabi";
     if fs::exists(path) {
         let old = try fs::read_to_str(path) catch _ { "" };
@@ -862,6 +868,63 @@ fn shared(cfg: Cfg, id: str) -> str | none {
     let md = try fs::symlink_metadata(path) catch _ { return none; };
     if !md.is_file() || md.len() > MAX_SOURCE as u64 { return none; }
     try fs::read_to_str(path) catch _ { none }
+}
+
+/// The takedown list as last read: when its file was last looked at,
+/// its size and time then, and the ids in it.
+struct Takedown {
+    checked: i64;
+    stamp: str;
+    ids: Dict<str, bool>;
+}
+
+static TAKEDOWN: Mutex<Takedown> = Mutex::new(Takedown { checked: 0i64, stamp: "", ids: Dict::new() });
+
+/// Seconds between looks at the takedown file, so a share request costs
+/// at most one stat a while.
+const TAKEDOWN_TTL: i64 = 2i64;
+
+/// Whether share `id` was taken down: PLAY_TAKEDOWN names it. The file
+/// is read again when its size or time changes, so an edit takes effect
+/// within TAKEDOWN_TTL without a restart.
+fn taken_down(cfg: Cfg, id: str) -> bool {
+    if cfg.takedown.is_empty() { return false; }
+    using g = TAKEDOWN.lock() {
+        let t = g.get();
+        let now = now_secs();
+        if t.checked == 0i64 || now - t.checked >= TAKEDOWN_TTL {
+            t.checked = now;
+            let stamp = file_stamp(cfg.takedown);
+            if stamp != t.stamp {
+                t.stamp = stamp;
+                t.ids = read_takedown(cfg.takedown);
+                eprintln(f"takedown: {t.ids.len()} share ids from {cfg.takedown}");
+            }
+            g.set(t);
+        }
+        t.ids.contains_key(id)
+    }
+}
+
+/// `<size>:<mtime>` of the file at `path`, or "" when there is none.
+fn file_stamp(path: str) -> str {
+    let md = try fs::metadata(path) catch _ { return ""; };
+    let t = try md.modified() catch _ { return f"{md.len()}:"; };
+    f"{md.len()}:{t.unix_nanos()}"
+}
+
+/// The share ids in a takedown file: one a line, as an id, a /p/<id>
+/// path or a whole link; blank lines and `#` comments are skipped.
+fn read_takedown(path: str) -> Dict<str, bool> {
+    let ids: Dict<str, bool> = Dict::new();
+    let text = try fs::read_to_str(path) catch _ { return ids; };
+    for line in text.lines() {
+        let t = line.trim();
+        if let k: usize = t.find("#") { t = t[:k].trim(); }
+        if let k: usize = t.rfind("/") { t = t[k + 1:]; }
+        if valid_id(t) { ids.insert(t, true); }
+    }
+    ids
 }
 
 fn count_shares(dir: str) -> i64 {
@@ -890,6 +953,24 @@ fn shared_page(cfg: Cfg, src: str, at: str, ko: bool) -> Resp | none {
     // index.html has one <title> and one <main>.
     r.body = bytes_of(html.replace("<title>", "<meta name=\"robots\" content=\"noindex\">\n<title>")
         .replace("<main ", f"<pre id=\"shared\" hidden{mods.to_str()}>\n{chrome::esc(src)}</pre>\n<main "));
+    r
+}
+
+/// 410 for a share that was taken down: a short page saying so, or
+/// plain text under /api/.
+fn gone_in(cfg: Cfg, p: str, ko: bool) -> Resp {
+    let plain = text(410, if ko { "이 링크는 내려졌습니다." } else { "This link was taken down." });
+    if p.starts_with("/api/") { return plain; }
+    let r = file_resp("static/404.html") ?? { return plain; };
+    let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return plain; };
+    let mail = "<a href=\"mailto:privacy@nabi-lang.org\">privacy@nabi-lang.org</a>";
+    let (title, body) = if ko {
+        ("<title>내려진 링크 · Nabi 플레이그라운드</title>", chrome::not_found("내려진 링크", f"이 링크의 코드는 요청에 따라 내려졌습니다. 문의는 {mail}로 보내 주세요.", [("/ko", "플레이그라운드로 돌아가기")]))
+    } else {
+        ("<title>Link removed · Nabi Playground</title>", chrome::not_found("Link removed", f"The code at this link was taken down. Questions go to {mail}.", [("/", "Back to the playground")]))
+    };
+    r.body = bytes_of(page_text(cfg, html.replace("<title>Not found · Nabi Playground</title>", title).replace("<!--web:not-found-->", body), "/", ko));
+    r.status = 410;
     r
 }
 
@@ -962,9 +1043,14 @@ fn page_in(cfg: Cfg, path: str, at: str, ko: bool) -> Resp | none {
     let r = file_resp(path) ?? { return none; };
     if !path.ends_with(".html") { return r; }
     let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return r; };
-    let local = lang::page(html, ko).replace("<!--play:langs-->", lang::switch(at, ko)).replace("<!--play:lang-menu-->", lang::menu(at, ko)).replace("<!--play:packages-->", packages_note(cfg, ko));
-    r.body = bytes_of(stamp(cfg, fill(local.replace("og.png?v=dev", "og.png?v=" + cfg.og).replace("nabi dev →", f"nabi {cfg.release} →"), ko)));
+    r.body = bytes_of(page_text(cfg, html, at, ko));
     r
+}
+
+/// A page's markup with everything filled in (page_in).
+fn page_text(cfg: Cfg, html: str, at: str, ko: bool) -> str {
+    let local = lang::page(html, ko).replace("<!--play:langs-->", lang::switch(at, ko)).replace("<!--play:lang-menu-->", lang::menu(at, ko)).replace("<!--play:packages-->", packages_note(cfg, ko));
+    stamp(cfg, fill(local.replace("og.png?v=dev", "og.png?v=" + cfg.og).replace("nabi dev →", f"nabi {cfg.release} →"), ko))
 }
 
 /// The stylesheets and scripts a page names, as `"/x?v=<version>"`, so
@@ -1072,7 +1158,9 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
         return Resp { status: 200, headers: ["Content-Type: text/plain; charset=utf-8", http::FRESH], body: bytes_of(chrome::security_txt("https://playground.nabi-lang.org")) };
     }
     if p.starts_with("/api/share/") {
-        let src = shared(cfg, p["/api/share/".len():]) ?? { return text(404, "No such link."); };
+        let id = p["/api/share/".len():];
+        if taken_down(cfg, id) { return gone_in(cfg, p, false); }
+        let src = shared(cfg, id) ?? { return text(404, "No such link."); };
         return text(200, src);
     }
     if p.starts_with("/api/wasm/") { return wasm_by_key(cfg, p["/api/wasm/".len():]); }
@@ -1084,6 +1172,7 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
     }
     let (ko, at) = lang::split(p);
     if at.starts_with("/p/") {
+        if taken_down(cfg, at[3:]) { return gone_in(cfg, p, ko); }
         let src = shared(cfg, at[3:]) ?? { return not_found_in(cfg, p, ko); };
         let x = shared_page(cfg, src, at, ko) ?? { return not_found_in(cfg, p, ko); };
         return cached(x, true, r);
@@ -1526,4 +1615,35 @@ fn modules_by_key() {
     expect(missing.status == 404 && body_of(missing).contains("POST the source"), body_of(missing));
     expect(wasm_by_key(cfg, "../cache/x").status == 404 && wasm_by_key(cfg, key.to_uppercase()).status == 404, "bad keys");
     expect(page.contains(f"<pre id=\"shared\" hidden data-wasm0=\"{key}\">") && !page.contains("data-wasm2"), "shared page names the cached key");
+}
+
+/// A share in PLAY_TAKEDOWN answers 410, and the list is read again
+/// when it changes.
+#[test]
+fn takedowns() {
+    let work = f"{env::temp_dir()}/nabi-playground-takedown-{std::process::id()}";
+    try fs::create_dir_all(work + "/shares") catch e { panic(f"{e}"); };
+    let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: "", wrap: "", work: work, jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: work + "/shares", share_rate: 10, share_max: 10, og: "dev", release: "dev", takedown: work + "/takedown" };
+    let reset = || { using g = TAKEDOWN.lock() { g.set(Takedown { checked: 0i64, stamp: "", ids: Dict::new() }); } };
+    let id = body_of(share(cfg, "fn bad() {}\n"));
+    reset();
+    expect(!taken_down(cfg, id), "no file: nothing taken down");
+    try fs::write(cfg.takedown, f"# a comment\n\nhttps://playground.nabi-lang.org/p/{id}  # reported\nnot-an-id\n") catch e { panic(f"{e}"); };
+    reset();
+    let down = taken_down(cfg, id);
+    let again = share(cfg, "fn bad() {}\n");
+    let page = gone_in(cfg, "/p/" + id, false);
+    let ko = gone_in(cfg, "/ko/p/" + id, true);
+    let api = gone_in(cfg, "/api/share/" + id, false);
+    try fs::write(cfg.takedown, "\n") catch e { panic(f"{e}"); };
+    reset();
+    let back = taken_down(cfg, id);
+    try fs::remove_dir_all(work) catch _ {};
+    reset();
+    expect(down && !taken_down(cfg, "aaaaaaaaaa"), "listed by its link");
+    expect(again.status == 410, "no new short link for it");
+    expect(page.status == 410 && body_of(page).contains("Link removed") && body_of(page).contains("mailto:privacy@nabi-lang.org") && body_of(page).contains("<title>Link removed · Nabi Playground</title>") && !body_of(page).contains("<!--web:"), "the page");
+    expect(ko.status == 410 && body_of(ko).contains("내려진 링크") && body_of(ko).contains("<html lang=\"ko\""), "the Korean page");
+    expect(api.status == 410 && body_of(api) == "This link was taken down.", "plain under /api/");
+    expect(!back, "read again on change");
 }
