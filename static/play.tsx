@@ -9,6 +9,7 @@ import { render } from "preact";
 import type { VNode } from "preact";
 import { Code, Gutter, Underlines } from "./ui/editor.tsx";
 import type { Diag } from "./ui/editor.tsx";
+import type { Highlighter } from "./highlight.ts";
 import { Examples } from "./ui/examples.tsx";
 import { Batch, Output } from "./ui/output.tsx";
 import type { Chunk } from "./ui/output.tsx";
@@ -61,6 +62,16 @@ function resize(el: Resizable, change: () => void): void {
   el.rz = el.animate([from, to], { duration: 200, easing: "cubic-bezier(.2,0,0,1)" });
 }
 
+// nabi-syntax's tree-sitter highlighting (highlight.ts), loaded after
+// the page; until then, or if it cannot load, the editor's own lexer.
+let highlighter: Highlighter | null = null;
+addEventListener("load", () => {
+  import("/highlight.js")
+    .then(() => globalThis.nabiHighlight)
+    .then((h) => { if (h) { highlighter = h; paint(); } })
+    .catch(() => {});
+});
+
 // The last failed compile's diagnostics that point into main.nabi.
 // Cleared on the next edit.
 let diags: Diag[] = [];
@@ -68,7 +79,9 @@ let diags: Diag[] = [];
 // The layers follow the text on every edit; the gutter only when its
 // line count or its marks change.
 function paint(): void {
-  render(<Code text={ed.value} />, hl);
+  let cls: Uint8Array | null = null;
+  try { cls = highlighter ? highlighter.classes(ed.value) : null; } catch { highlighter = null; }
+  render(<Code text={ed.value} cls={cls} />, hl);
   render(diags.length ? <Underlines text={ed.value} diags={diags} /> : null, sqs);
   const n = ed.value.split("\n").length;
   if (gutter.childElementCount !== n || gutter.dataset.marked || diags.length) {

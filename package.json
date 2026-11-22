@@ -13,6 +13,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
-    "preact": "10.29.8"
+    "preact": "10.29.8",
+    "web-tree-sitter": "0.27.1"
   }
 }

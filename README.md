@@ -30,6 +30,18 @@ Without `PLAY_WRAP` the server only listens on loopback: an unsandboxed nabic co
 
 The page scripts are TypeScript and TSX: each file directly in `static/` is a page script, `static/ui/*.tsx` are the Preact components they render into the server's markup, and the kit's `web/js/*.ts` come along. `npm ci`, then `npm run build` bundles each page script to the `.js` beside it with esbuild (`web/tools/build.ts`: types erased, JSX for Preact, imports bundled, minified), and `npm run check` type-checks everything with `tsc`. Run the build before `nabi build`: the kit's scripts are built into the program and the site serves the rest. The `.js` files are build output and not checked in.
 
+## Highlighting
+
+The editor highlights with nabi-syntax's tree-sitter grammar and highlight queries, as the editors do: `static/ts/` holds the grammar built to wasm, `highlights.scm` and web-tree-sitter's own wasm (its version pinned in package.json), all served from this site. `static/highlight.ts` loads them after the page and re-parses only what each edit changed; captures map to nabi-syntax's classes (`k t s n c a m`), so the editor and the docs agree. Until it loads, or if it cannot, the editor keeps its small lexer (`static/ui/editor.tsx`).
+
+The grammar is pinned to the nabi-syntax commit in `nabi-syntax.rev`. Change it in nabi-syntax, then sync (needs the tree-sitter CLI):
+
+```bash
+node scripts/sync-grammar.mjs                # build at the pinned commit
+node scripts/sync-grammar.mjs --from ../nabi-syntax   # from a checkout, pinning its HEAD
+node scripts/sync-grammar.mjs --check        # fail if static/ts/ differs
+```
+
 ## Web kit
 
 `web/` is [nabi-lang/web](https://github.com/nabi-lang/web), pinned to a commit. The server builds its `web` library in (`Dep::path("web/nabi")`): HTTP, the canonical-address 301s, and the kit's files, served at `/nabi.css`, `/theme.js`, `/logo.svg`, the icons and `/site.webmanifest`. The webfonts are files, not built in: `/fonts/...` comes from `web/assets/fonts` relative to the working directory (a day, with an ETag), so a deploy ships that directory beside `static/`. `static/index.html` and `static/404.html` hold `<!--web:fonts-->` (the font preloads), `<!--web:icons-->`, `<!--web:wordmark-->`, `<!--web:theme-button-->`, `<!--web:header-sites-->`, `<!--web:credits-->`, `<!--web:social-->`, `<!--web:theme-seg-->` and `<!--web:not-found-->`, which the server fills from the kit's markup (the sites, licence and credit, social links and theme switch go in the header and its menu; the 404 body is the one every Nabi site shares). Move to a newer kit with:

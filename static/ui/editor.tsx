@@ -14,8 +14,9 @@ export interface Diag {
   len: number;
 }
 
-// Highlighting with nabi-syntax's classes (k t s n c a). KEYWORDS is a
-// hand-kept subset of its grammars/keywords.nabion.
+// Highlighting with nabi-syntax's classes (k t s n c a m): from its
+// tree-sitter grammar once highlight.js has loaded (play.tsx), else this
+// lexer, whose KEYWORDS is a hand-kept subset of grammars/keywords.nabion.
 
 const KEYWORDS = new Set(("fn let mut if else match for in while loop return break continue struct enum trait impl " +
   "pub use mod const static type as is none true false throws try catch async await yield self Self where ref " +
@@ -23,11 +24,29 @@ const KEYWORDS = new Set(("fn let mut if else match for in while loop return bre
 const PRIMS = new Set("i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str".split(" "));
 const TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?\*\/)|(f?"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)')|(#!?\[[^\]\n]*\]?)|(\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?(?:[iu](?:8|16|32|64|128|size)|f32|f64)?\b|\b0x[\da-fA-F_]+\b)|([A-Za-z_][A-Za-z0-9_]*)/g;
 
+// The class names of a tree-sitter highlighting's indexes (highlight.ts).
+const CLASSES = ["", "k", "t", "s", "n", "c", "a", "m"];
+
 // The highlighted source, rendered into <pre class="hl">. Plain runs
 // between tokens are one string each, so the DOM is one text node per
 // run. Typing re-renders it on every input: Preact patches the text
-// nodes that changed instead of parsing the whole file again.
-export function Code({ text }: { text: string }): VNode {
+// nodes that changed. `cls` is tree-sitter's class of each UTF-16 unit;
+// without it, the lexer below.
+export function Code({ text, cls }: { text: string; cls?: Uint8Array | null }): VNode {
+  if (cls && cls.length === text.length) {
+    const kids: ComponentChild[] = [];
+    let i = 0;
+    while (i < text.length) {
+      const k = cls[i]!;
+      let j = i + 1;
+      while (j < text.length && cls[j] === k) j++;
+      const run = text.slice(i, j);
+      kids.push(k ? <span class={CLASSES[k]}>{run}</span> : run);
+      i = j;
+    }
+    kids.push("\n");
+    return <code>{kids}</code>;
+  }
   const kids: ComponentChild[] = [];
   let plain = "";
   let last = 0;
