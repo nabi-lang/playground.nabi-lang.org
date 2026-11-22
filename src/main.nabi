@@ -26,7 +26,9 @@
 //                               {"result": ..} as nabils answers, run in
 //                               the sandbox like a build; 400 / 413 / 429
 //                               / 503 / 504 for the request itself
-//   GET  /ko, /ko/p/<id>        the same pages in Korean (lang.nabi)
+//   GET  /ko, /zh-hans, /zh-hant and their /p/<id>
+//                               the same pages in Korean and in
+//                               Chinese (lang.nabi)
 //   GET  /api/health            200 `ok` and what is there, one
 //                               `key value` a line, or 503 and why (no
 //                               runner, a sandbox that fails its
@@ -89,6 +91,7 @@ use web::chrome;
 use web::http;
 use web::http::Request;
 use web::kit;
+use web::lang::Lang;
 use web::url;
 
 const MAX_SOURCE: usize = 65536;
@@ -1050,8 +1053,8 @@ fn count_shares(dir: str) -> i64 {
 /// The <pre> also names the modules of the source the cache holds,
 /// `data-wasm0` and `data-wasm2` by level, so Run can GET them
 /// (/api/wasm/<key>) instead of asking for a compile.
-fn shared_page(cfg: Cfg, src: str, at: str, ko: bool) -> Resp | none {
-    let r = page_in(cfg, "static/index.html", at, ko) ?? { return none; };
+fn shared_page(cfg: Cfg, src: str, at: str, l: Lang) -> Resp | none {
+    let r = page_in(cfg, "static/index.html", at, l) ?? { return none; };
     let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return none; };
     let mods = StrBuf::new();
     for opt in ["0", "2"] {
@@ -1066,18 +1069,16 @@ fn shared_page(cfg: Cfg, src: str, at: str, ko: bool) -> Resp | none {
 
 /// 410 for a share that was taken down: a short page saying so, or
 /// plain text under /api/.
-fn gone_in(cfg: Cfg, p: str, ko: bool) -> Resp {
-    let plain = text(410, if ko { "이 링크는 내려졌습니다." } else { "This link was taken down." });
+fn gone_in(cfg: Cfg, p: str, l: Lang) -> Resp {
+    let w = lang::words(l);
+    let plain = text(410, w.gone_plain);
     if p.starts_with("/api/") { return plain; }
     let r = file_resp("static/404.html") ?? { return plain; };
     let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return plain; };
     let mail = "<a href=\"mailto:privacy@nabi-lang.org\">privacy@nabi-lang.org</a>";
-    let (title, body) = if ko {
-        ("<title>내려진 링크 · Nabi 플레이그라운드</title>", chrome::not_found("내려진 링크", f"이 링크의 코드는 요청에 따라 내려졌습니다. 문의는 {mail}로 보내 주세요.", [("/ko", "플레이그라운드로 돌아가기")]))
-    } else {
-        ("<title>Link removed · Nabi Playground</title>", chrome::not_found("Link removed", f"The code at this link was taken down. Questions go to {mail}.", [("/", "Back to the playground")]))
-    };
-    r.body = bytes_of(page_text(cfg, html.replace("<title>Not found · Nabi Playground</title>", title).replace("<!--web:not-found-->", body), "/", ko));
+    let title = f"<title>{w.gone_title}</title>";
+    let body = chrome::not_found(w.gone, w.gone_pre + mail + w.gone_post, [(lang::path_in("/", l), w.back)]);
+    r.body = bytes_of(page_text(cfg, html.replace("<title>Not found · Nabi Playground</title>", title).replace("<!--web:not-found-->", body), "/", l));
     r.status = 410;
     r
 }
@@ -1113,21 +1114,17 @@ fn font_resp(path: str) -> Resp | none {
 
 /// The pages' shared markup, from the kit's chrome: each
 /// `<!--web:name-->` placeholder replaced.
-fn fill(html: str, ko: bool) -> str {
-    let sites = chrome::Sites { home: "https://nabi-lang.org", docs: if ko { "https://docs.nabi-lang.org/latest/ko" } else { "https://docs.nabi-lang.org/latest" }, registry: "https://packages.nabi-lang.org", playground: lang::path_in("/", ko), current: "playground" };
-    let lost = if ko {
-        chrome::not_found("페이지를 찾을 수 없습니다", "이 주소에는 페이지가 없습니다.", [("/ko", "플레이그라운드로 돌아가기")])
-    } else {
-        chrome::not_found("Page not found", "There is no page at this address.", [("/", "Back to the playground")])
-    };
-    let made = if ko { chrome::MADE_BY_KO } else { chrome::MADE_BY };
-    html.replace("<!--web:fonts-->\n", chrome::fonts_in("/", ko)).replace("<!--web:theme-button-->", chrome::theme_button(ko)).replace("<!--web:header-sites-->", chrome::header_sites(sites, ko)).replace("<!--web:credits-->", f"<span>{chrome::LICENSE}</span> · {made}").replace("<!--web:social-->", chrome::SOCIAL).replace("<!--web:legal-->", chrome::legal_links(ko)).replace("<!--web:theme-seg-->", chrome::theme_seg(ko)).replace("<!--web:not-found-->", lost).replace("<!--web:wordmark-->", chrome::wordmark("Nabi"))
+fn fill(html: str, l: Lang) -> str {
+    let docs = if l.is_en() { "https://docs.nabi-lang.org/latest" } else { "https://docs.nabi-lang.org/latest/" + l.slug() };
+    let sites = chrome::Sites { home: "https://nabi-lang.org", docs: docs, registry: "https://packages.nabi-lang.org", playground: lang::path_in("/", l), current: "playground" };
+    let lost = chrome::not_found(l.words().not_found, lang::words(l).no_page, [(lang::path_in("/", l), lang::words(l).back)]);
+    html.replace("<!--web:fonts-->\n", chrome::fonts_for("/", l)).replace("<!--web:theme-button-->", chrome::theme_button_for(l)).replace("<!--web:header-sites-->", chrome::header_sites_for(sites, l)).replace("<!--web:credits-->", f"<span>{chrome::LICENSE}</span> · {chrome::MADE_BY}").replace("<!--web:social-->", chrome::SOCIAL).replace("<!--web:legal-->", chrome::legal_links_for(l)).replace("<!--web:theme-seg-->", chrome::theme_seg_for(l)).replace("<!--web:not-found-->", lost).replace("<!--web:wordmark-->", chrome::wordmark("Nabi"))
             .replace("<!--web:icons-->\n", chrome::icons("/"))
 }
 
 /// The note's list of the packages a program may use, each linked to
 /// its page on the registry.
-fn packages_note(cfg: Cfg, ko: bool) -> str {
+fn packages_note(cfg: Cfg, l: Lang) -> str {
     if cfg.deps.is_empty() { return ""; }
     let names: List<str> = List::new();
     for n in cfg.packages.split(",") {
@@ -1137,28 +1134,28 @@ fn packages_note(cfg: Cfg, ko: bool) -> str {
     }
     if names.is_empty() { return ""; }
     names.sort();
-    let head = if ko { " 공식 패키지를 바로 쓸 수 있습니다: " } else { " Official packages are ready to use: " };
-    head + names.join(", ") + "."
+    let w = lang::words(l);
+    w.packages + names.join(w.sep) + w.stop
 }
 
 /// A page with the og:image version, the shared markup and the asset
 /// versions filled in: a new og.png is a new URL, so link previews
 /// refetch it.
-fn page_resp(cfg: Cfg, path: str) -> Resp | none { page_in(cfg, path, "/", false) }
+fn page_resp(cfg: Cfg, path: str) -> Resp | none { page_in(cfg, path, "/", Lang::En) }
 
-/// page_resp for the page at `at` (without /ko), in Korean if `ko`.
-fn page_in(cfg: Cfg, path: str, at: str, ko: bool) -> Resp | none {
+/// page_resp for the page at `at` (without its language) in `l`.
+fn page_in(cfg: Cfg, path: str, at: str, l: Lang) -> Resp | none {
     let r = file_resp(path) ?? { return none; };
     if !path.ends_with(".html") { return r; }
     let html = try str::from_utf8(r.body[0:r.body.len()]) catch _ { return r; };
-    r.body = bytes_of(page_text(cfg, html, at, ko));
+    r.body = bytes_of(page_text(cfg, html, at, l));
     r
 }
 
 /// A page's markup with everything filled in (page_in).
-fn page_text(cfg: Cfg, html: str, at: str, ko: bool) -> str {
-    let local = lang::page(html, ko).replace("<!--play:langs-->", lang::switch(at, ko)).replace("<!--play:lang-menu-->", lang::menu(at, ko)).replace("<!--play:packages-->", packages_note(cfg, ko));
-    stamp(cfg, fill(local.replace("og.png?v=dev", "og.png?v=" + cfg.og).replace("nabi dev →", f"nabi {cfg.release} →"), ko))
+fn page_text(cfg: Cfg, html: str, at: str, l: Lang) -> str {
+    let local = lang::page(html, l).replace("<!--play:langs-->", lang::switch(at, l)).replace("<!--play:lang-menu-->", lang::menu(at, l)).replace("<!--play:packages-->", packages_note(cfg, l));
+    stamp(cfg, fill(local.replace("og.png?v=dev", "og.png?v=" + cfg.og).replace("nabi dev →", f"nabi {cfg.release} →"), l))
 }
 
 /// The stylesheets and scripts a page names, as `"/x?v=<version>"`, so
@@ -1276,7 +1273,7 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
     }
     if p.starts_with("/api/share/") {
         let id = p["/api/share/".len():];
-        if taken_down(cfg, id) { return gone_in(cfg, p, false); }
+        if taken_down(cfg, id) { return gone_in(cfg, p, Lang::En); }
         let src = shared(cfg, id) ?? { return text(404, "No such link."); };
         return text(200, src);
     }
@@ -1287,16 +1284,16 @@ fn route(cfg: Cfg, s: TcpStream, r: Request) -> Resp {
     if let c: str = url::canonical(p) {
         return Resp { status: 301, headers: [url::moved(c, r.query), "Cache-Control: public, max-age=3600"], body: List::new() };
     }
-    let (ko, at) = lang::split(p);
+    let (l, at) = lang::split(p);
     if at.starts_with("/p/") {
-        if taken_down(cfg, at[3:]) { return gone_in(cfg, p, ko); }
-        let src = shared(cfg, at[3:]) ?? { return not_found_in(cfg, p, ko); };
-        let x = shared_page(cfg, src, at, ko) ?? { return not_found_in(cfg, p, ko); };
+        if taken_down(cfg, at[3:]) { return gone_in(cfg, p, l); }
+        let src = shared(cfg, at[3:]) ?? { return not_found_in(cfg, p, l); };
+        let x = shared_page(cfg, src, at, l) ?? { return not_found_in(cfg, p, l); };
         return cached(x, true, r);
     }
-    if ko {
-        if at != "/" { return not_found_in(cfg, p, true); }
-        let x = page_in(cfg, "static/index.html", "/", true) ?? { return not_found_in(cfg, p, true); };
+    if !l.is_en() {
+        if at != "/" { return not_found_in(cfg, p, l); }
+        let x = page_in(cfg, "static/index.html", "/", l) ?? { return not_found_in(cfg, p, l); };
         return cached(x, true, r);
     }
     if let x: Resp = asset(cfg, p) { return cached(x, x.headers[0].starts_with("Content-Type: text/html"), r); }
@@ -1381,11 +1378,11 @@ fn check_sandbox(cfg: Cfg) -> str {
 }
 
 /// 404: the page with the site's chrome, or plain text under /api/.
-fn not_found(cfg: Cfg, p: str) -> Resp { not_found_in(cfg, p, false) }
+fn not_found(cfg: Cfg, p: str) -> Resp { not_found_in(cfg, p, Lang::En) }
 
-fn not_found_in(cfg: Cfg, p: str, ko: bool) -> Resp {
+fn not_found_in(cfg: Cfg, p: str, l: Lang) -> Resp {
     if !p.starts_with("/api/") {
-        if let x: Resp = page_in(cfg, "static/404.html", "/", ko) {
+        if let x: Resp = page_in(cfg, "static/404.html", "/", l) {
             x.status = 404;
             return x;
         }
@@ -1543,7 +1540,7 @@ fn share_links() {
     expect((shared(cfg, id) ?? "") == "fn main() {}\n", "read back");
     expect(shared(cfg, "../shares/" + id) is none && shared(cfg, id + "x") is none && shared(cfg, "ABCDEFGHIJ") is none && shared(cfg, "abcdefgh1j") is none, "bad ids");
     expect(shared(cfg, "aaaaaaaaaa") is none, "unknown id");
-    let x = shared_page(cfg, "</pre><script>alert(1)</script>", "/p/" + id, false) ?? panic("page");
+    let x = shared_page(cfg, "</pre><script>alert(1)</script>", "/p/" + id, Lang::En) ?? panic("page");
     expect(body_of(x).contains("<pre id=\"shared\" hidden>\n&lt;/pre&gt;&lt;script&gt;") && body_of(x).contains("noindex"), "escaped in the page");
     // A different code under an existing id is refused, not overwritten.
     try fs::write(cfg.shares + "/" + share_id("x") + ".nabi", "y") catch e { panic(f"{e}"); };
@@ -1636,19 +1633,28 @@ fn cache_evicts_least_recent() {
     expect(n == 6, f"under the limit nothing goes: {n}");
 }
 
-/// /ko is the page in Korean: its chrome, its switch back, its 404.
+/// /ko, /zh-hans and /zh-hant are the page in Korean and Chinese: its
+/// chrome, its switch back, its 404.
 #[test]
-fn korean_pages() {
+fn translated_pages() {
     let cfg = Cfg { addr: "127.0.0.1:0", nabic: "", nabi: "", site: "", mjs: "", wrap: "", work: "", jobs: 1, timeout: 20u64, rate: 30, client_header: "", shares: "", share_rate: 10, share_max: 2, og: "dev", release: "dev", deps: "/d", packages: "json,spec=special,stats" };
     let en = body_of(page_resp(cfg, "static/index.html") ?? panic("en"));
-    let ko = body_of(page_in(cfg, "static/index.html", "/", true) ?? panic("ko"));
+    let ko = body_of(page_in(cfg, "static/index.html", "/", Lang::Ko) ?? panic("ko"));
     expect(en.contains("<html lang=\"en\"") && en.contains("href=\"/ko\" hreflang=\"ko\"") && en.contains("Official packages are ready to use: <a href=\"https://packages.nabi-lang.org/packages/json\">json</a>, <a href=\"https://packages.nabi-lang.org/packages/stats\">stats</a>."), "en page");
     expect(ko.contains("<html lang=\"ko\"") && ko.contains(">공유<") && ko.contains("<a href=\"/\" hreflang=\"en\"") && ko.contains("플레이그라운드</a>") && ko.contains("pretendard"), "ko page");
     expect(ko.contains("<link rel=\"canonical\" href=\"https://playground.nabi-lang.org/ko\">") && ko.contains("hreflang=\"en\" href=\"https://playground.nabi-lang.org/\""), "ko addresses");
-    let p = body_of(page_in(cfg, "static/index.html", "/p/abcdefghij", true) ?? panic("ko p"));
+    let p = body_of(page_in(cfg, "static/index.html", "/p/abcdefghij", Lang::Ko) ?? panic("ko p"));
     expect(p.contains("href=\"/p/abcdefghij\" hreflang=\"en\""), "a share's switch");
-    let lost = not_found_in(cfg, "/ko/nope", true);
+    let lost = not_found_in(cfg, "/ko/nope", Lang::Ko);
     expect(lost.status == 404 && body_of(lost).contains("플레이그라운드로 돌아가기") && body_of(lost).contains("<html lang=\"ko\""), "ko 404");
+    let hans = body_of(page_in(cfg, "static/index.html", "/", Lang::ZhHans) ?? panic("zh-Hans"));
+    let hant = body_of(page_in(cfg, "static/index.html", "/p/abcdefghij", Lang::ZhHant) ?? panic("zh-Hant"));
+    expect(hans.contains("<html lang=\"zh-Hans\"") && hans.contains("</svg>运行</button>") && hans.contains("可以直接使用以下官方包：<a href=\"https://packages.nabi-lang.org/packages/json\">json</a>、<a") && hans.contains("https://nabi-lang.org/zh-hans/privacy") && hans.contains("<link rel=\"canonical\" href=\"https://playground.nabi-lang.org/zh-hans\">") && !hans.contains("pretendard"), "zh-Hans page");
+    expect(hant.contains("<html lang=\"zh-Hant\"") && hant.contains("</svg>執行</button>") && hant.contains("官方套件") && hant.contains("href=\"/zh-hans/p/abcdefghij\" hreflang=\"zh-Hans\"") && hant.contains("hreflang=\"zh-Hant\" href=\"https://playground.nabi-lang.org/zh-hant\"") && hant.contains("https://docs.nabi-lang.org/latest/zh-hant\""), "zh-Hant share page");
+    for (l, code) in [(Lang::ZhHans, "zh-Hans"), (Lang::ZhHant, "zh-Hant")] {
+        let nf = not_found_in(cfg, "/" + l.slug() + "/nope", l);
+        expect(nf.status == 404 && body_of(nf).contains(f"<html lang=\"{code}\"") && body_of(nf).contains(l.words().not_found) && body_of(nf).contains("返回 Playground"), code);
+    }
     cfg.deps = "";
     expect(!body_of(page_resp(cfg, "static/index.html") ?? panic("en")).contains("Official packages"), "no packages, no list");
 }
@@ -1751,7 +1757,7 @@ fn modules_by_key() {
     let c = compile(cfg, src, "0");
     let key = module_key(cfg, src, "0");
     let got = wasm_by_key(cfg, key);
-    let page = body_of(shared_page(cfg, src, "/p/abcdefghij", false) ?? panic("page"));
+    let page = body_of(shared_page(cfg, src, "/p/abcdefghij", Lang::En) ?? panic("page"));
     let missing = wasm_by_key(cfg, module_key(cfg, src, "2"));
     try fs::remove_dir_all(work) catch _ {};
     expect(c.status == 200 && c.headers.contains("X-Nabi-Module: " + key) && c.headers.contains("X-Nabi-Cache: miss"), "compile names its key");
@@ -1776,9 +1782,10 @@ fn takedowns() {
     reset();
     let down = taken_down(cfg, id);
     let again = share(cfg, "fn bad() {}\n");
-    let page = gone_in(cfg, "/p/" + id, false);
-    let ko = gone_in(cfg, "/ko/p/" + id, true);
-    let api = gone_in(cfg, "/api/share/" + id, false);
+    let page = gone_in(cfg, "/p/" + id, Lang::En);
+    let ko = gone_in(cfg, "/ko/p/" + id, Lang::Ko);
+    let zh = gone_in(cfg, "/zh-hant/p/" + id, Lang::ZhHant);
+    let api = gone_in(cfg, "/api/share/" + id, Lang::En);
     try fs::write(cfg.takedown, "\n") catch e { panic(f"{e}"); };
     reset();
     let back = taken_down(cfg, id);
@@ -1788,6 +1795,7 @@ fn takedowns() {
     expect(again.status == 410, "no new short link for it");
     expect(page.status == 410 && body_of(page).contains("Link removed") && body_of(page).contains("mailto:privacy@nabi-lang.org") && body_of(page).contains("<title>Link removed · Nabi Playground</title>") && !body_of(page).contains("<!--web:"), "the page");
     expect(ko.status == 410 && body_of(ko).contains("내려진 링크") && body_of(ko).contains("<html lang=\"ko\""), "the Korean page");
+    expect(zh.status == 410 && body_of(zh).contains("連結已撤下") && body_of(zh).contains("<html lang=\"zh-Hant\""), "the Chinese page");
     expect(api.status == 410 && body_of(api) == "This link was taken down.", "plain under /api/");
     expect(!back, "read again on change");
 }

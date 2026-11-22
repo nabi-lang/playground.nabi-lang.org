@@ -1,101 +1,182 @@
-// The page in Korean: `/ko`, `/ko/p/<id>` and the 404s under /ko/ are
-// static/index.html and static/404.html with each English piece below
-// replaced, longest first where one holds another. The script's own
-// words are in static/ui/text.ts.
+// The page in each language: `/ko`, `/zh-hans`, `/zh-hant`, their
+// `/p/<id>` pages and the 404s under them are static/index.html and
+// static/404.html with each English piece below replaced, longest first
+// where one holds another. The script's own words are in
+// static/ui/text.ts.
+
+use web::lang::Lang;
 
 /// The language of request path `p` and the path in it: `/ko` is `/`
-/// in Korean, `/ko/p/x` is `/p/x`.
-pub fn split(p: str) -> (bool, str) {
-    if p == "/ko" { return (true, "/"); }
-    if let rest: str = p.strip_prefix("/ko/") { return (true, "/" + rest); }
-    (false, p)
+/// in Korean, `/zh-hant/p/x` is `/p/x` in Traditional Chinese.
+pub fn split(p: str) -> (Lang, str) { web::lang::split(p) }
+
+/// Path `p` (`/`, `/p/x`) as a page in `l`.
+pub fn path_in(p: str, l: Lang) -> str {
+    if l.is_en() { return p; }
+    if p == "/" { "/" + l.slug() } else { "/" + l.slug() + p }
 }
 
-/// Path `p` (`/`, `/p/x`) as a page of the language `ko` says.
-pub fn path_in(p: str, ko: bool) -> str {
-    if !ko { return p; }
-    if p == "/" { "/ko" } else { "/ko" + p }
+/// The menu's list of languages for the page at `p` (without its
+/// language); the script carries the address's #fragment over.
+pub fn switch(p: str, l: Lang) -> str {
+    let b = StrBuf::new();
+    for m in web::lang::ALL {
+        if m == l {
+            b.push_str(f"<span aria-current=\"true\" lang=\"{m.code()}\">{m.name()}</span>");
+        } else {
+            b.push_str(f"<a href=\"{path_in(p, m)}\" hreflang=\"{m.code()}\" lang=\"{m.code()}\" data-lang>{m.name()}</a>");
+        }
+    }
+    f"<nav class=\"langs\" aria-label=\"{l.words().language}\">{b.to_str()}</nav>"
 }
 
-/// The menu's English / Korean switch for the page at `p` (without
-/// /ko); the script carries the address's #fragment over.
-pub fn switch(p: str, ko: bool) -> str {
-    let en = if ko { f"<a href=\"{path_in(p, false)}\" hreflang=\"en\" lang=\"en\" data-lang>English</a>" } else { "<span aria-current=\"true\" lang=\"en\">English</span>" };
-    let kr = if ko { "<span aria-current=\"true\" lang=\"ko\">한국어</span>" } else { f"<a href=\"{path_in(p, true)}\" hreflang=\"ko\" lang=\"ko\" data-lang>한국어</a>" };
-    let label = if ko { "언어" } else { "Language" };
-    f"<nav class=\"langs\" aria-label=\"{label}\">{en}{kr}</nav>"
+/// The header's language menu (web::chrome::lang_menu_for) for the page
+/// at `p`; on a phone the header hides it and the menu's switch stays.
+pub fn menu(p: str, l: Lang) -> str {
+    web::chrome::lang_menu_for(l, web::chrome::menu_items(l, |m| path_in(p, m)))
 }
 
-/// The header's language menu (web::chrome::lang_menu) for the page at
-/// `p`; on a phone the header hides it and the menu's switch stays.
-pub fn menu(p: str, ko: bool) -> str {
-    web::chrome::lang_menu(ko, [web::chrome::Lang { code: "en", name: "English", href: if ko { path_in(p, false) } else { "" } }, web::chrome::Lang { code: "ko", name: "한국어", href: if ko { "" } else { path_in(p, true) } }])
-}
-
-/// `html` in Korean when `ko`.
-pub fn page(html: str, ko: bool) -> str {
-    if !ko { return html; }
-    let out = html;
-    for (en, kr) in PIECES { out = out.replace(en, kr); }
+/// `html` in `l`.
+pub fn page(html: str, l: Lang) -> str {
+    if l.is_en() { return html; }
+    let here = "https://playground.nabi-lang.org" + path_in("/", l);
+    let out = html.replace("<html lang=\"en\"", f"<html lang=\"{l.code()}\"")
+        .replace("content=\"en_US\"", f"content=\"{l.og_locale()}\"")
+        .replace("<link rel=\"canonical\" href=\"https://playground.nabi-lang.org/\">", f"<link rel=\"canonical\" href=\"{here}\">")
+        .replace("<meta property=\"og:url\" content=\"https://playground.nabi-lang.org/\">", f"<meta property=\"og:url\" content=\"{here}\">")
+        .replace("<a class=\"brand\" href=\"/\">", f"<a class=\"brand\" href=\"{path_in("/", l)}\">");
+    for (en, ko, hans, hant) in PIECES {
+        out = out.replace(en, match l { Lang::Ko => ko, Lang::ZhHans => hans, Lang::ZhHant => hant, Lang::En => en });
+    }
     out
 }
 
-/// English piece, Korean piece.
-pub const PIECES: [(str, str); 40] = [
-    ("<html lang=\"en\"", "<html lang=\"ko\""),
-    ("content=\"en_US\"", "content=\"ko_KR\""),
-    ("<title>Not found · Nabi Playground</title>", "<title>찾을 수 없음 · Nabi 플레이그라운드</title>"),
-    ("<title>Nabi Playground</title>", "<title>Nabi 플레이그라운드</title>"),
-    ("content=\"Nabi Playground\"", "content=\"Nabi 플레이그라운드\""),
-    ("<h1 class=\"sr-only\">Nabi Playground</h1>", "<h1 class=\"sr-only\">Nabi 플레이그라운드</h1>"),
-    ("content=\"Write Nabi in the browser and run it: the server compiles it to WebAssembly, your browser runs it.\"", "content=\"브라우저에서 Nabi 코드를 쓰고 실행합니다. 서버가 WebAssembly로 컴파일하고 브라우저가 실행합니다.\""),
-    ("content=\"Write Nabi in the browser and run it.\"", "content=\"브라우저에서 Nabi 코드를 쓰고 실행합니다.\""),
-    ("content=\"Nabi Playground: write Nabi in the browser and run it\"", "content=\"Nabi 플레이그라운드: 브라우저에서 Nabi 코드를 쓰고 실행합니다\""),
-    ("<link rel=\"canonical\" href=\"https://playground.nabi-lang.org/\">", "<link rel=\"canonical\" href=\"https://playground.nabi-lang.org/ko\">"),
-    ("<meta property=\"og:url\" content=\"https://playground.nabi-lang.org/\">", "<meta property=\"og:url\" content=\"https://playground.nabi-lang.org/ko\">"),
-    ("<a class=\"brand\" href=\"/\">", "<a class=\"brand\" href=\"/ko\">"),
-    (">Skip to the editor<", ">편집기로 건너뛰기<"),
-    ("aria-label=\"Playground\"", "aria-label=\"플레이그라운드\""),
-    ("title=\"Run (Ctrl+Enter)\"", "title=\"실행 (Ctrl+Enter)\""),
-    ("</svg>Run</button>", "</svg>실행</button>"),
-    ("<span class=\"sr-only\">Example</span>", "<span class=\"sr-only\">예제</span>"),
-    ("<span class=\"sr-only\">Optimization level</span>", "<span class=\"sr-only\">최적화 수준</span>"),
-    ("-O0 · debug", "-O0 · 디버그"),
-    ("-O2 · release", "-O2 · 릴리스"),
-    ("title=\"Lay the code out with nabi fmt\">Format<", "title=\"nabi fmt로 코드를 정리합니다\">정리<"),
-    ("id=\"share\">Share<", "id=\"share\">공유<"),
-    ("aria-label=\"More\" title=\"More\"", "aria-label=\"더 보기\" title=\"더 보기\""),
-    (">Copy this link:<", ">이 링크를 복사하세요:<"),
-    ("id=\"share-close\">Close<", "id=\"share-close\">닫기<"),
-    ("aria-label=\"Source\"", "aria-label=\"소스\""),
-    ("title=\"Put the example back as it was (Undo brings your edits back)\">Reset example<", "title=\"예제를 처음 상태로 되돌립니다 (실행 취소로 고친 내용을 되살릴 수 있습니다)\">예제 되돌리기<"),
-    ("<span class=\"sr-only\">Nabi source, </span>", "<span class=\"sr-only\">Nabi 소스, </span>"),
-    (">Tab indents. Press Escape, then Tab, to leave the editor. Ctrl+Space suggests names, F12 goes to a definition, Ctrl+F finds and replaces, Ctrl+/ comments lines out, F8 goes to the next problem.<", ">Tab은 들여쓰기입니다. 편집기에서 나가려면 Escape를 누른 다음 Tab을 누르세요. Ctrl+Space는 이름을 제안하고, F12는 정의로 가며, Ctrl+F는 찾아 바꾸고, Ctrl+/는 줄을 주석으로 만들고, F8은 다음 문제로 갑니다.<"),
-    (">Ln 1, Col 1<", ">줄 1, 열 1<"),
-    ("aria-label=\"Resize the panes\"", "aria-label=\"창 크기 조절\""),
-    ("aria-label=\"Output\"", "aria-label=\"출력\""),
-    ("<span class=\"lbl\">Output</span>", "<span class=\"lbl\">출력</span>"),
-    ("title=\"Text the program reads as its standard input\">Input<", "title=\"프로그램이 표준 입력으로 읽는 텍스트\">입력<"),
-    ("aria-label=\"Standard input\"", "aria-label=\"표준 입력\""),
-    ("placeholder=\"What the program reads from stdin\"", "placeholder=\"프로그램이 stdin에서 읽을 내용\""),
-    ("id=\"copy-out\" disabled>Copy<", "id=\"copy-out\" disabled>복사<"),
-    ("id=\"clear\">Clear<", "id=\"clear\">지우기<"),
-    ("aria-label=\"Program output\"", "aria-label=\"프로그램 출력\""),
+/// The server's own words on a page, by language.
+pub struct Words {
+    /// A 404's sentence, and the way back.
+    pub no_page: str;
+    pub back: str;
+    /// A taken-down share: its title, its heading, the plain answer, and
+    /// the sentence before and after the address questions go to.
+    pub gone_title: str;
+    pub gone: str;
+    pub gone_plain: str;
+    pub gone_pre: str;
+    pub gone_post: str;
+    /// Before the list of packages in the note, and what joins them.
+    pub packages: str;
+    pub sep: str;
+    pub stop: str;
+}
+
+pub fn words(l: Lang) -> Words {
+    match l {
+        Lang::En => Words {
+            no_page: "There is no page at this address.", back: "Back to the playground",
+            gone_title: "Link removed · Nabi Playground", gone: "Link removed", gone_plain: "This link was taken down.",
+            gone_pre: "The code at this link was taken down. Questions go to ", gone_post: ".",
+            packages: " Official packages are ready to use: ", sep: ", ", stop: ".",
+        },
+        Lang::Ko => Words {
+            no_page: "이 주소에는 페이지가 없습니다.", back: "플레이그라운드로 돌아가기",
+            gone_title: "내려진 링크 · Nabi 플레이그라운드", gone: "내려진 링크", gone_plain: "이 링크는 내려졌습니다.",
+            gone_pre: "이 링크의 코드는 요청에 따라 내려졌습니다. 문의는 ", gone_post: "로 보내 주세요.",
+            packages: " 공식 패키지를 바로 쓸 수 있습니다: ", sep: ", ", stop: ".",
+        },
+        Lang::ZhHans => Words {
+            no_page: "此地址没有页面。", back: "返回 Playground",
+            gone_title: "链接已撤下 · Nabi Playground", gone: "链接已撤下", gone_plain: "此链接已被撤下。",
+            gone_pre: "此链接中的代码已应要求撤下。如有疑问，请发邮件至 ", gone_post: "。",
+            packages: "可以直接使用以下官方包：", sep: "、", stop: "。",
+        },
+        Lang::ZhHant => Words {
+            no_page: "此網址沒有頁面。", back: "返回 Playground",
+            gone_title: "連結已撤下 · Nabi Playground", gone: "連結已撤下", gone_plain: "此連結已被撤下。",
+            gone_pre: "此連結中的程式碼已應要求撤下。如有疑問，請寄信至 ", gone_post: "。",
+            packages: "可以直接使用以下官方套件：", sep: "、", stop: "。",
+        },
+    }
+}
+
+/// English piece; Korean, Simplified and Traditional Chinese pieces. The
+/// name Nabi Playground stays in Chinese (docs/i18n/glossary-zh.md).
+pub const PIECES: [(str, str, str, str); 35] = [
+    ("<title>Not found · Nabi Playground</title>", "<title>찾을 수 없음 · Nabi 플레이그라운드</title>", "<title>找不到页面 · Nabi Playground</title>", "<title>找不到頁面 · Nabi Playground</title>"),
+    ("<title>Nabi Playground</title>", "<title>Nabi 플레이그라운드</title>", "<title>Nabi Playground</title>", "<title>Nabi Playground</title>"),
+    ("content=\"Nabi Playground\"", "content=\"Nabi 플레이그라운드\"", "content=\"Nabi Playground\"", "content=\"Nabi Playground\""),
+    ("<h1 class=\"sr-only\">Nabi Playground</h1>", "<h1 class=\"sr-only\">Nabi 플레이그라운드</h1>", "<h1 class=\"sr-only\">Nabi Playground</h1>", "<h1 class=\"sr-only\">Nabi Playground</h1>"),
+    ("content=\"Write Nabi in the browser and run it: the server compiles it to WebAssembly, your browser runs it.\"",
+        "content=\"브라우저에서 Nabi 코드를 쓰고 실행합니다. 서버가 WebAssembly로 컴파일하고 브라우저가 실행합니다.\"",
+        "content=\"在浏览器中编写并运行 Nabi 程序：服务器把它编译为 WebAssembly，再由你的浏览器运行。\"",
+        "content=\"在瀏覽器中撰寫並執行 Nabi 程式：伺服器將它編譯為 WebAssembly，再由你的瀏覽器執行。\""),
+    ("content=\"Write Nabi in the browser and run it.\"", "content=\"브라우저에서 Nabi 코드를 쓰고 실행합니다.\"", "content=\"在浏览器中编写并运行 Nabi 程序。\"", "content=\"在瀏覽器中撰寫並執行 Nabi 程式。\""),
+    ("content=\"Nabi Playground: write Nabi in the browser and run it\"", "content=\"Nabi 플레이그라운드: 브라우저에서 Nabi 코드를 쓰고 실행합니다\"", "content=\"Nabi Playground：在浏览器中编写并运行 Nabi 程序\"", "content=\"Nabi Playground：在瀏覽器中撰寫並執行 Nabi 程式\""),
+    (">Skip to the editor<", ">편집기로 건너뛰기<", ">跳到编辑器<", ">跳至編輯器<"),
+    ("aria-label=\"Playground\"", "aria-label=\"플레이그라운드\"", "aria-label=\"Playground\"", "aria-label=\"Playground\""),
+    ("title=\"Run (Ctrl+Enter)\"", "title=\"실행 (Ctrl+Enter)\"", "title=\"运行（Ctrl+Enter）\"", "title=\"執行（Ctrl+Enter）\""),
+    ("</svg>Run</button>", "</svg>실행</button>", "</svg>运行</button>", "</svg>執行</button>"),
+    ("<span class=\"sr-only\">Example</span>", "<span class=\"sr-only\">예제</span>", "<span class=\"sr-only\">示例</span>", "<span class=\"sr-only\">範例</span>"),
+    ("<span class=\"sr-only\">Optimization level</span>", "<span class=\"sr-only\">최적화 수준</span>", "<span class=\"sr-only\">优化级别</span>", "<span class=\"sr-only\">最佳化等級</span>"),
+    ("-O0 · debug", "-O0 · 디버그", "-O0 · 调试", "-O0 · 偵錯"),
+    ("-O2 · release", "-O2 · 릴리스", "-O2 · 发布", "-O2 · 發行"),
+    ("title=\"Lay the code out with nabi fmt\">Format<", "title=\"nabi fmt로 코드를 정리합니다\">정리<", "title=\"用 nabi fmt 整理代码格式\">格式化<", "title=\"用 nabi fmt 整理程式碼格式\">格式化<"),
+    ("id=\"share\">Share<", "id=\"share\">공유<", "id=\"share\">分享<", "id=\"share\">分享<"),
+    ("aria-label=\"More\" title=\"More\"", "aria-label=\"더 보기\" title=\"더 보기\"", "aria-label=\"更多\" title=\"更多\"", "aria-label=\"更多\" title=\"更多\""),
+    (">Copy this link:<", ">이 링크를 복사하세요:<", ">复制此链接：<", ">複製此連結：<"),
+    ("id=\"share-close\">Close<", "id=\"share-close\">닫기<", "id=\"share-close\">关闭<", "id=\"share-close\">關閉<"),
+    ("aria-label=\"Source\"", "aria-label=\"소스\"", "aria-label=\"源代码\"", "aria-label=\"原始碼\""),
+    ("title=\"Put the example back as it was (Undo brings your edits back)\">Reset example<",
+        "title=\"예제를 처음 상태로 되돌립니다 (실행 취소로 고친 내용을 되살릴 수 있습니다)\">예제 되돌리기<",
+        "title=\"把示例恢复原样（撤销可以找回你的修改）\">重置示例<",
+        "title=\"將範例還原成原本的樣子（復原可以找回你的修改）\">重設範例<"),
+    ("<span class=\"sr-only\">Nabi source, </span>", "<span class=\"sr-only\">Nabi 소스, </span>", "<span class=\"sr-only\">Nabi 源代码，</span>", "<span class=\"sr-only\">Nabi 原始碼，</span>"),
+    (">Tab indents. Press Escape, then Tab, to leave the editor. Ctrl+Space suggests names, F12 goes to a definition, Ctrl+F finds and replaces, Ctrl+/ comments lines out, F8 goes to the next problem.<",
+        ">Tab은 들여쓰기입니다. 편집기에서 나가려면 Escape를 누른 다음 Tab을 누르세요. Ctrl+Space는 이름을 제안하고, F12는 정의로 가며, Ctrl+F는 찾아 바꾸고, Ctrl+/는 줄을 주석으로 만들고, F8은 다음 문제로 갑니다.<",
+        ">Tab 用于缩进。要离开编辑器，先按 Escape，再按 Tab。Ctrl+Space 提示名称，F12 跳到定义，Ctrl+F 查找和替换，Ctrl+/ 把所在行注释掉，F8 跳到下一个问题。<",
+        ">Tab 用於縮排。要離開編輯器，先按 Escape，再按 Tab。Ctrl+Space 提示名稱，F12 跳至定義，Ctrl+F 尋找及取代，Ctrl+/ 將所在行註解掉，F8 跳至下一個問題。<"),
+    (">Ln 1, Col 1<", ">줄 1, 열 1<", ">行 1，列 1<", ">第 1 行，第 1 欄<"),
+    ("aria-label=\"Resize the panes\"", "aria-label=\"창 크기 조절\"", "aria-label=\"调整窗格大小\"", "aria-label=\"調整窗格大小\""),
+    ("aria-label=\"Output\"", "aria-label=\"출력\"", "aria-label=\"输出\"", "aria-label=\"輸出\""),
+    ("<span class=\"lbl\">Output</span>", "<span class=\"lbl\">출력</span>", "<span class=\"lbl\">输出</span>", "<span class=\"lbl\">輸出</span>"),
+    ("title=\"Text the program reads as its standard input\">Input<", "title=\"프로그램이 표준 입력으로 읽는 텍스트\">입력<", "title=\"程序从标准输入读取的文本\">输入<", "title=\"程式從標準輸入讀取的文字\">輸入<"),
+    ("aria-label=\"Standard input\"", "aria-label=\"표준 입력\"", "aria-label=\"标准输入\"", "aria-label=\"標準輸入\""),
+    ("placeholder=\"What the program reads from stdin\"", "placeholder=\"프로그램이 stdin에서 읽을 내용\"", "placeholder=\"程序从 stdin 读取的内容\"", "placeholder=\"程式從 stdin 讀取的內容\""),
+    ("id=\"copy-out\" disabled>Copy<", "id=\"copy-out\" disabled>복사<", "id=\"copy-out\" disabled>复制<", "id=\"copy-out\" disabled>複製<"),
+    ("id=\"clear\">Clear<", "id=\"clear\">지우기<", "id=\"clear\">清空<", "id=\"clear\">清除<"),
+    ("aria-label=\"Program output\"", "aria-label=\"프로그램 출력\"", "aria-label=\"程序输出\"", "aria-label=\"程式輸出\""),
     (">Compiled to WebAssembly on the server, run in your browser. One file of up to 64 KiB; no files, network or threads; a run stops after 10 s. Your code stays in this browser until you press Share, which stores a copy on the server for a short link.<",
-        ">서버에서 WebAssembly로 컴파일하고 브라우저에서 실행합니다. 64 KiB까지의 파일 하나이며, 파일·네트워크·스레드는 쓸 수 없고, 실행은 10초 뒤에 멈춥니다. 코드는 공유를 누르기 전까지 이 브라우저에만 남고, 공유를 누르면 짧은 링크를 위해 서버에 사본이 저장됩니다.<"),
+        ">서버에서 WebAssembly로 컴파일하고 브라우저에서 실행합니다. 64 KiB까지의 파일 하나이며, 파일·네트워크·스레드는 쓸 수 없고, 실행은 10초 뒤에 멈춥니다. 코드는 공유를 누르기 전까지 이 브라우저에만 남고, 공유를 누르면 짧은 링크를 위해 서버에 사본이 저장됩니다.<",
+        ">在服务器上编译为 WebAssembly，在你的浏览器中运行。只能是一个不超过 64 KiB 的文件；不能使用文件、网络或线程；运行 10 秒后停止。按下“分享”之前，代码只保存在此浏览器中；分享时，服务器会存一份副本，用于生成短链接。<",
+        ">在伺服器上編譯為 WebAssembly，在你的瀏覽器中執行。只能是一個不超過 64 KiB 的檔案；不能使用檔案、網路或執行緒；執行 10 秒後停止。按下「分享」之前，程式碼只保存在此瀏覽器中；分享時，伺服器會存一份副本，用於產生短網址。<"),
 ];
 
 #[test]
 fn every_piece_is_on_a_page() {
     let index = try std::fs::read_to_str("static/index.html") catch e { panic(f"{e}"); };
     let lost = try std::fs::read_to_str("static/404.html") catch e { panic(f"{e}"); };
-    for (en, _) in PIECES {
+    for (en, _, _, _) in PIECES {
         if !index.contains(en) && !lost.contains(en) { panic(f"not on a page: {en}"); }
     }
-    expect(split("/ko").0 && split("/ko").1 == "/" && split("/ko/p/abc").1 == "/p/abc" && !split("/kor").0 && split("/p/x").1 == "/p/x", "split");
-    expect(path_in("/", true) == "/ko" && path_in("/p/x", true) == "/ko/p/x" && path_in("/p/x", false) == "/p/x", "path_in");
-    let ko = page(index, true);
+    let (k, kp) = split("/ko");
+    let (h, hp) = split("/zh-hant/p/abc");
+    let (e, ep) = split("/kor");
+    expect(k == Lang::Ko && kp == "/" && h == Lang::ZhHant && hp == "/p/abc" && e == Lang::En && ep == "/kor", "split");
+    expect(path_in("/", Lang::Ko) == "/ko" && path_in("/p/x", Lang::ZhHans) == "/zh-hans/p/x" && path_in("/p/x", Lang::En) == "/p/x", "path_in");
+    let ko = page(index, Lang::Ko);
     expect(ko.contains("<html lang=\"ko\"") && ko.contains(">실행</button>") && !ko.contains(">Share<"), "translated");
+    for l in [Lang::ZhHans, Lang::ZhHant] {
+        let zh = page(index, l);
+        expect(zh.contains(f"<html lang=\"{l.code()}\"") && zh.contains(f"<link rel=\"canonical\" href=\"https://playground.nabi-lang.org/{l.slug()}\">") && zh.contains(f"content=\"{l.og_locale()}\""), l.code());
+        // what is left in English is code, names and markup
+        for (en, _, hans, hant) in PIECES {
+            let mine = if l == Lang::ZhHans { hans } else { hant };
+            if mine != en { expect(!zh.contains(en), en); }
+        }
+    }
+    let s = switch("/p/x", Lang::ZhHant);
+    expect(s.contains("<span aria-current=\"true\" lang=\"zh-Hant\">繁體中文</span>") && s.contains("<a href=\"/zh-hans/p/x\" hreflang=\"zh-Hans\"") && s.contains("<a href=\"/p/x\" hreflang=\"en\"") && s.contains("aria-label=\"語言\""), s);
+    let m = menu("/", Lang::ZhHans);
+    expect(m.contains("href=\"/zh-hant\" hreflang=\"zh-Hant\"") && m.contains("href=\"/ko\" hreflang=\"ko\"") && m.contains("<span aria-current=\"true\" lang=\"zh-Hans\">"), m);
 }
 
 #[cfg(test)]

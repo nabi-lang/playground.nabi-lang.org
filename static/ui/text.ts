@@ -1,14 +1,21 @@
-// The words the script writes, in the page's language: /ko pages are
-// Korean (the server translates the markup, src/lang.nabi), the rest
-// English.
+// The words the script writes, in the page's language: the server
+// translates the markup of /ko, /zh-hans and /zh-hant (src/lang.nabi),
+// the rest is English.
 
-export const KO = document.documentElement.lang === "ko";
-// The page's own address: "/" or "/ko".
-export const BASE = KO ? "/ko" : "/";
+import { dir, lang } from "../../web/js/lang/lang.ts";
+import type { Code } from "../../web/js/lang/lang.ts";
+
+export const LANG: Code = lang();
+// The page's language directory as a path prefix: "", "/ko", "/zh-hans".
+export const PREFIX = LANG === "en" ? "" : "/" + dir(LANG).slice(0, -1);
+// The page's own address: "/", "/ko", "/zh-hans", "/zh-hant".
+export const BASE = PREFIX || "/";
 
 const plural = (n: number, one: string, many: string): string => `${n} ${n > 1 ? many : one}`;
 
 const EN = {
+  // CodeMirror's own words (EditorState.phrases); English needs none.
+  phrases: {} as Record<string, string>,
   pos: (line: number, col: number): string => `Ln ${line}, Col ${col}`,
   errors: (n: number): string => plural(n, "error", "errors"),
   warnings: (n: number): string => plural(n, "warning", "warnings"),
@@ -64,7 +71,18 @@ const EN = {
   definedAt: (line: number, text: string): string => `Definition, line ${line}: ${text}`,
 };
 
-const KO_TEXT: typeof EN = {
+const KO: typeof EN = {
+  phrases: {
+    "Control character": "제어 문자", "Folded lines": "접힌 줄", "Unfolded lines": "펼친 줄", "to": "~",
+    "folded code": "접힌 코드", "unfold": "펼치기", "Fold line": "줄 접기", "Unfold line": "줄 펼치기",
+    "Find": "찾기", "Replace": "바꾸기", "next": "다음", "previous": "이전", "all": "모두",
+    "match case": "대소문자 구분", "by word": "단어 단위", "regexp": "정규식",
+    "replace": "바꾸기", "replace all": "모두 바꾸기", "close": "닫기",
+    "current match": "현재 일치 항목", "replaced $ matches": "일치 항목 $개를 바꿨습니다",
+    "replaced match on line $": "$번째 줄의 일치 항목을 바꿨습니다", "on line": "줄",
+    "Go to line": "줄로 이동", "go": "이동",
+    "Diagnostics": "진단", "No diagnostics": "진단 없음", "Completions": "자동 완성", "Selection deleted": "선택 영역을 지웠습니다",
+  },
   pos: (line, col) => `줄 ${line}, 열 ${col}`,
   errors: (n) => `오류 ${n}개`,
   warnings: (n) => `경고 ${n}개`,
@@ -120,4 +138,141 @@ const KO_TEXT: typeof EN = {
   definedAt: (line, text) => `정의, ${line}번째 줄: ${text}`,
 };
 
-export const T = KO ? KO_TEXT : EN;
+// zh-Hans as written in mainland China, zh-Hant as in Taiwan
+// (docs/i18n/glossary-zh.md); each is its own text, not a conversion.
+const ZH_HANS: typeof EN = {
+  phrases: {
+    "Control character": "控制字符", "Folded lines": "已折叠的行", "Unfolded lines": "已展开的行", "to": "至",
+    "folded code": "已折叠的代码", "unfold": "展开", "Fold line": "折叠此行", "Unfold line": "展开此行",
+    "Find": "查找", "Replace": "替换", "next": "下一个", "previous": "上一个", "all": "全部",
+    "match case": "区分大小写", "by word": "全字匹配", "regexp": "正则表达式",
+    "replace": "替换", "replace all": "全部替换", "close": "关闭",
+    "current match": "当前匹配", "replaced $ matches": "已替换 $ 处匹配",
+    "replaced match on line $": "已替换第 $ 行的匹配", "on line": "位于行",
+    "Go to line": "跳到行", "go": "跳转",
+    "Diagnostics": "诊断", "No diagnostics": "没有诊断", "Completions": "补全", "Selection deleted": "已删除所选内容",
+  },
+  pos: (line, col) => `行 ${line}，列 ${col}`,
+  errors: (n) => `${n} 个错误`,
+  warnings: (n) => `${n} 个警告`,
+  firstDiag: "跳到第一处",
+  examples: {
+    hello: "Hello, world", sums: "和类型与 match", none: "T | none 与 ??",
+    errors: "throws, try, catch", iter: "列表、闭包、迭代器", structs: "结构体与 trait",
+    input: "读取输入（stdin）", json: "JSON（json）", stats: "统计（stats）",
+    linalg: "线性代数（linalg）", plot: "绘图（plot）",
+    error: "编译错误：T | none", try: "编译错误：缺少 try",
+  },
+  fromLink: "链接中的代码",
+  mine: "你的代码",
+  share: "分享",
+  shareFailed: "分享失败",
+  copied: "链接已复制",
+  truncated: (n) => `输出超过 ${n.toLocaleString("zh-Hans")} 行，已截断`,
+  copy: "复制",
+  copyDone: "已复制",
+  copyFailed: "复制失败",
+  run: "运行",
+  runTitle: (keys) => `运行（${keys}）`,
+  stop: "停止",
+  stopped: "已停止",
+  stoppedCompiling: "编译时已停止",
+  compiling: "正在编译…",
+  offline: "离线",
+  noAnswer: "没有响应",
+  down: "Playground 的服务器没有响应，请过一分钟再试。",
+  busy: (s) => `服务器繁忙 · ${s} 秒后重试`,
+  busyNote: (s) => `编译服务器繁忙，${s} 秒后重试（按“停止”取消）。`,
+  busyTryIn: (s) => `服务器繁忙，请 ${s} 秒后再试。`,
+  failed: "失败",
+  running: "正在运行…",
+  stoppedAfter: (s) => `${s} 秒后已停止`,
+  stoppedLimit: (s) => `已停止 · 限时 ${s} 秒`,
+  tooOld: "此浏览器版本过旧，无法在这里运行 WebAssembly，请换用较新的浏览器。",
+  cannotRun: "无法运行",
+  crashed: "异常终止",
+  exitCode: (c) => `退出码 ${c}`,
+  exit: (c, t) => `退出码 ${c} · ${t}`,
+  runnerFailed: "运行器未能启动",
+  cannotFormat: "无法格式化",
+  formatted: "已格式化",
+  alreadyFormatted: "无需格式化",
+  optDebug: "-O0 · 调试",
+  optRelease: "-O2 · 发布",
+  linkTooNew: "此浏览器无法打开这个链接，请换用较新的浏览器",
+  linkDamaged: "链接中的代码已损坏",
+  hint: "按“运行”即可编译 main.nabi 并在这里运行。",
+  goTo: (line, col) => `跳到第 ${line} 行第 ${col} 列`,
+  displayAlt: "display() 的输出",
+  definedAt: (line, text) => `定义，第 ${line} 行：${text}`,
+};
+
+const ZH_HANT: typeof EN = {
+  phrases: {
+    "Control character": "控制字元", "Folded lines": "已摺疊的行", "Unfolded lines": "已展開的行", "to": "至",
+    "folded code": "已摺疊的程式碼", "unfold": "展開", "Fold line": "摺疊此行", "Unfold line": "展開此行",
+    "Find": "尋找", "Replace": "取代", "next": "下一個", "previous": "上一個", "all": "全部",
+    "match case": "大小寫須相符", "by word": "全字拼寫須相符", "regexp": "規則運算式",
+    "replace": "取代", "replace all": "全部取代", "close": "關閉",
+    "current match": "目前相符項目", "replaced $ matches": "已取代 $ 個相符項目",
+    "replaced match on line $": "已取代第 $ 行的相符項目", "on line": "位於行",
+    "Go to line": "跳至行", "go": "前往",
+    "Diagnostics": "診斷", "No diagnostics": "沒有診斷", "Completions": "自動完成", "Selection deleted": "已刪除所選內容",
+  },
+  pos: (line, col) => `第 ${line} 行，第 ${col} 欄`,
+  errors: (n) => `${n} 個錯誤`,
+  warnings: (n) => `${n} 個警告`,
+  firstDiag: "跳至第一處",
+  examples: {
+    hello: "Hello, world", sums: "和型別與 match", none: "T | none 與 ??",
+    errors: "throws, try, catch", iter: "串列、閉包、迭代器", structs: "結構與 trait",
+    input: "讀取輸入（stdin）", json: "JSON（json）", stats: "統計（stats）",
+    linalg: "線性代數（linalg）", plot: "繪圖（plot）",
+    error: "編譯錯誤：T | none", try: "編譯錯誤：缺少 try",
+  },
+  fromLink: "連結中的程式碼",
+  mine: "你的程式碼",
+  share: "分享",
+  shareFailed: "分享失敗",
+  copied: "連結已複製",
+  truncated: (n) => `輸出超過 ${n.toLocaleString("zh-Hant")} 行，已截斷`,
+  copy: "複製",
+  copyDone: "已複製",
+  copyFailed: "複製失敗",
+  run: "執行",
+  runTitle: (keys) => `執行（${keys}）`,
+  stop: "停止",
+  stopped: "已停止",
+  stoppedCompiling: "編譯時已停止",
+  compiling: "正在編譯…",
+  offline: "離線",
+  noAnswer: "沒有回應",
+  down: "Playground 的伺服器沒有回應，請過一分鐘再試。",
+  busy: (s) => `伺服器忙碌中 · ${s} 秒後重試`,
+  busyNote: (s) => `編譯伺服器忙碌中，${s} 秒後重試（按「停止」取消）。`,
+  busyTryIn: (s) => `伺服器忙碌中，請 ${s} 秒後再試。`,
+  failed: "失敗",
+  running: "正在執行…",
+  stoppedAfter: (s) => `${s} 秒後已停止`,
+  stoppedLimit: (s) => `已停止 · 限時 ${s} 秒`,
+  tooOld: "此瀏覽器版本過舊，無法在這裡執行 WebAssembly，請改用較新的瀏覽器。",
+  cannotRun: "無法執行",
+  crashed: "異常終止",
+  exitCode: (c) => `結束代碼 ${c}`,
+  exit: (c, t) => `結束代碼 ${c} · ${t}`,
+  runnerFailed: "執行器無法啟動",
+  cannotFormat: "無法格式化",
+  formatted: "已格式化",
+  alreadyFormatted: "無須格式化",
+  optDebug: "-O0 · 偵錯",
+  optRelease: "-O2 · 發行",
+  linkTooNew: "此瀏覽器無法開啟這個連結，請改用較新的瀏覽器",
+  linkDamaged: "連結中的程式碼已損毀",
+  hint: "按「執行」即可編譯 main.nabi 並在這裡執行。",
+  goTo: (line, col) => `跳至第 ${line} 行第 ${col} 欄`,
+  displayAlt: "display() 的輸出",
+  definedAt: (line, text) => `定義，第 ${line} 行：${text}`,
+};
+
+const TEXT: Record<Code, typeof EN> = { en: EN, ko: KO, "zh-Hans": ZH_HANS, "zh-Hant": ZH_HANT };
+export const T = TEXT[LANG];

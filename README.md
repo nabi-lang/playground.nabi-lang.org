@@ -7,7 +7,7 @@
 Source for https://playground.nabi-lang.org, the browser playground for Nabi. The page sends source to this server, which compiles it with `nabic --target=wasm32-unknown-unknown` and returns the module; the page runs it in a Web Worker. The server is written in Nabi.
 
 - Programs are one file, with no files, network, or threads (those calls fail with `Unsupported`), and stop after 10 seconds. Standard input is the text in the Input box above the output. They may use the official packages the server has prebuilt (`json::parse(s)`, `stats::mean(xs)`, `plot::line(x, y)`; see `PLAY_PACKAGES`), and `display(x)` shows a value by its picture: a plot's SVG (or a PNG) is drawn in the output, as in a notebook.
-- The page is in English at `/` and in Korean at `/ko` (`/ko/p/<id>`, `/ko#example=<name>`): `src/lang.nabi` translates the markup, `static/ui/text.ts` holds the script's words, and the menu switches between them, keeping the address's `#fragment`. The docs' Korean pages link their Run buttons to `/ko`.
+- The page is in English at `/`, in Korean at `/ko`, in Simplified Chinese at `/zh-hans` and in Traditional Chinese (as written in Taiwan) at `/zh-hant`, each with its share pages and examples (`/zh-hans/p/<id>`, `/zh-hant#example=<name>`): `src/lang.nabi` translates the markup, `static/ui/text.ts` holds the script's words (CodeMirror's own among them), and the language menu lists all four, keeping the address's `#fragment`. The Chinese text follows the docs' glossary (`docs/i18n/glossary-zh.md` in nabi-lang/docs); the name Nabi Playground stays in English there. The docs' Korean pages link their Run buttons to `/ko`, and the kit's footer links each language's page.
 - The page keeps the visitor's code in the browser's `localStorage` (edits to each example too, until Reset example). The server keeps source only when Share asks it to: `POST /api/share` stores it under `PLAY_SHARES` as `<id>.nabi`, the id being the first 50 bits of its SHA-256 in base32, and `/p/<id>` opens the page with it. A stored file is never rewritten, compiled or run by the server. When the server cannot store it, Share puts the deflated source in the link's `#code=` fragment instead (`#src=`, plain base64url, in browsers without deflate-raw).
 - An example has its own address, `/#example=<name>` (its file name in `static/examples/`, without `.nabi`). A link's or a share's address lasts until the first edit; then the address goes back to `/`. The picker leaves out an example that uses a package the server does not have (`PLAY_DEPS`, `PLAY_PACKAGES`).
 - Compiled modules are cached by SHA-256 of toolchain, packages, level and source.
@@ -41,7 +41,7 @@ The page scripts are TypeScript and TSX: each file directly in `static/` is a pa
 - `lsp.ts` and `transport.ts`: completion (as a name is typed, after `.` and `::`, and on Ctrl+Space), hover (after 400 ms) and the definition (F12, or Ctrl/⌘-click on a name) from `nabils`. The transport today is `POST /api/lsp`; it is silent when the endpoint is missing, slow (3 s) or busy, and pauses itself then. A wasm build of nabils in a Worker can replace it behind the same `Transport` interface.
 - `style.ts`: the page's CSP allows no inline `<style>`, which is where CodeMirror puts its base styles; they go into `play.css`'s own stylesheet instead, ahead of its rules, so `play.css` styles the editor with the site's tokens in both themes.
 
-The scripts weigh, gzipped: `play.js` 142 KB (before CodeMirror, 16 KB), `highlight.js` 21 KB plus its wasm, loaded after the page, `run.js` 1 KB.
+The scripts weigh, gzipped: `play.js` 145 KB (before CodeMirror, 16 KB), `highlight.js` 21 KB plus its wasm, loaded after the page, `run.js` 1 KB.
 
 ### Highlighting
 
@@ -57,7 +57,7 @@ node scripts/sync-grammar.mjs --check        # fail if static/ts/ differs
 
 ## Web kit
 
-`web/` is [nabi-lang/web](https://github.com/nabi-lang/web), pinned to a commit. The server builds its `web` library in (`Dep::path("web/nabi")`): HTTP, the canonical-address 301s, and the kit's files, served at `/nabi.css`, `/theme.js`, `/logo.svg`, the icons and `/site.webmanifest`. The webfonts are files, not built in: `/fonts/...` comes from `web/assets/fonts` relative to the working directory (a day, with an ETag), so a deploy ships that directory beside `static/`. `static/index.html` and `static/404.html` hold `<!--web:fonts-->` (the font preloads), `<!--web:icons-->`, `<!--web:wordmark-->`, `<!--web:theme-button-->`, `<!--web:header-sites-->`, `<!--web:credits-->`, `<!--web:social-->`, `<!--web:theme-seg-->` and `<!--web:not-found-->`, which the server fills from the kit's markup (the sites, licence and credit, social links and theme switch go in the header and its menu; the 404 body is the one every Nabi site shares). Move to a newer kit with:
+`web/` is [nabi-lang/web](https://github.com/nabi-lang/web), pinned to a commit. The server builds its `web` library in (`Dep::path("web/nabi")`): HTTP, the canonical-address 301s, and the kit's files, served at `/nabi.css`, `/theme.js`, `/logo.svg`, the icons and `/site.webmanifest`. The webfonts are files, not built in: `/fonts/...` comes from `web/assets/fonts` relative to the working directory (a day, with an ETag), so a deploy ships that directory beside `static/`. `static/index.html` and `static/404.html` hold `<!--web:fonts-->` (the font preloads), `<!--web:icons-->`, `<!--web:wordmark-->`, `<!--web:theme-button-->`, `<!--web:header-sites-->`, `<!--web:credits-->`, `<!--web:social-->`, `<!--web:legal-->`, `<!--web:theme-seg-->` and `<!--web:not-found-->`, which the server fills from the kit's markup (the sites, licence and credit, social links, legal links and theme switch go in the header and its menu, in the page's language (`web::lang::Lang`); the 404 body is the one every Nabi site shares). Move to a newer kit with:
 
 ```bash
 git submodule update --remote web
@@ -154,8 +154,8 @@ Requests to take a link down (code that is not the sharer's to share, personal d
 |---|---|
 | `src/main.nabi` | Settings, compile, format and language API (job dir, sandbox, time limit, cache, rate limit), modules by key, share links and takedowns, health, static files, the kit's files and markup, the 404 page |
 | `src/lsp.nabi` | `/api/lsp`'s JSON and the nabils session it runs |
-| `src/lang.nabi` | The Korean pages: `/ko` addresses and the markup's Korean words |
-| `static/` | `index.html`, `404.html`, `play.tsx`, its editor (`editor/`, see Editor) and its `ui/*.tsx` components (`ui/text.ts`: the script's words in English and Korean), `highlight.ts` (tree-sitter), `run.ts` (the worker), `play.css`, `examples/*.nabi`, `og.png` |
+| `src/lang.nabi` | The translated pages: `/ko`, `/zh-hans` and `/zh-hant` addresses, the language menu, and the markup's words in each language |
+| `static/` | `index.html`, `404.html`, `play.tsx`, its editor (`editor/`, see Editor) and its `ui/*.tsx` components (`ui/text.ts`: the script's words in English, Korean and both Chinese variants), `highlight.ts` (tree-sitter), `run.ts` (the worker), `play.css`, `examples/*.nabi`, `og.png` |
 | `web/` | the web kit (submodule): `nabi.css`, `theme.js`, the marks and icons, and the `web` library (HTTP, addresses) |
 | `scripts/og.html` | Source of `static/og.png` |
 | `scripts/` | `Dockerfile` + `docker-sandbox.sh` (recommended), `sandbox.sh` (bubblewrap, with a systemd scope when it can), `warm.sh` (the toolchain's cache, nabils' included, and the prebuilt packages), `probe.sh` (an uptime probe) |

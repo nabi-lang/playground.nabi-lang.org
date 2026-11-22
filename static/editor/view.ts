@@ -18,6 +18,7 @@ import { diagnostics, show, at } from "./lint.tsx";
 import type { Diag } from "./lint.tsx";
 import { folding, highlighting, indentation, repaint } from "./syntax.ts";
 import { language } from "./lsp.ts";
+import { T } from "../ui/text.ts";
 import type { Transport } from "./transport.ts";
 
 export type { Diag };
@@ -84,6 +85,7 @@ export function createEditor(parent: HTMLElement, o: Options): Editor {
     highlightSelectionMatches(),
     search({ top: true }),
     codeFolding(),
+    EditorState.phrases.of(T.phrases),
     nabiData,
     indentation,
     folding,

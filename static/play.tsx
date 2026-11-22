@@ -14,7 +14,7 @@ import { Examples } from "./ui/examples.tsx";
 import { Batch, Output } from "./ui/output.tsx";
 import type { Chunk } from "./ui/output.tsx";
 import { RunLabel } from "./ui/run-label.tsx";
-import { BASE, KO, T } from "./ui/text.ts";
+import { BASE, PREFIX, T } from "./ui/text.ts";
 
 // An element the page always has.
 const $ = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -304,7 +304,7 @@ async function shortLink(src: string, q: string): Promise<string> {
   const res = await fetch("/api/share", { method: "POST", body: src, headers: { "Content-Type": "text/plain; charset=utf-8" } });
   const id = res.ok ? (await res.text()).trim() : "";
   if (!/^[a-z2-7]{10}$/.test(id)) throw new Error(`HTTP ${res.status}`);
-  return `${location.origin}${KO ? "/ko" : ""}/p/${id}${q ? `#${q}` : ""}`;
+  return `${location.origin}${PREFIX}/p/${id}${q ? `#${q}` : ""}`;
 }
 shareBtn.addEventListener("click", async () => {
   const q = opt.value !== "0" ? `opt=${opt.value}` : "";
