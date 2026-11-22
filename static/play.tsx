@@ -899,7 +899,7 @@ stdinEd.addEventListener("keydown", (ev) => {
 
 // The language switch takes the address's #fragment (an example, a
 // link's code) along to the other language's page.
-for (const a of document.querySelectorAll<HTMLAnchorElement>("a[data-lang]")) {
+for (const a of document.querySelectorAll<HTMLAnchorElement>("a[data-lang], .lang-menu a[hreflang]")) {
   a.addEventListener("click", () => { a.href = a.pathname + location.hash; });
 }
 

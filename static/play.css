@@ -285,6 +285,9 @@ select.tb.mono { font-size: 12px; }
 @media (max-width: 1080px) {
   .ver { display: none; }
   .ib.theme { margin-left: auto; }
+  /* the language menu sits right before the theme switch */
+  .hdr .lang-menu { margin-left: auto; }
+  .hdr .lang-menu + .ib.theme { margin-left: 0; }
 }
 @media (max-width: 860px) {
   body { height: auto; }
@@ -296,6 +299,7 @@ select.tb.mono { font-size: 12px; }
   #fmt { order: 1; margin-left: auto; }
   #share { order: 1; }
   .ib.theme { order: 2; margin-left: 0; }
+  .hdr .lang-menu { order: 2; margin-left: 0; }
   .more { order: 2; }
   .hdr .in::after { content: ""; order: 3; flex-basis: 100%; }
   .run { order: 4; }
@@ -367,5 +371,9 @@ select.tb.mono { font-size: 12px; }
 
 /* The menu's English / Korean switch. */
 .langs { display: flex; gap: 12px; }
+/* the header's language menu; on a phone the header has no room, and
+   the More menu's switch is the way */
+@media (min-width: 521px) { .menu .langs { display: none; } }
+@media (max-width: 520px) { .hdr .lang-menu { display: none; } }
 .langs a { color: var(--ink-2); }
 .langs [aria-current] { color: var(--ink); font-weight: 500; }

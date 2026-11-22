@@ -26,6 +26,12 @@ pub fn switch(p: str, ko: bool) -> str {
     f"<nav class=\"langs\" aria-label=\"{label}\">{en}{kr}</nav>"
 }
 
+/// The header's language menu (web::chrome::lang_menu) for the page at
+/// `p`; on a phone the header hides it and the menu's switch stays.
+pub fn menu(p: str, ko: bool) -> str {
+    web::chrome::lang_menu(ko, [web::chrome::Lang { code: "en", name: "English", href: if ko { path_in(p, false) } else { "" } }, web::chrome::Lang { code: "ko", name: "한국어", href: if ko { "" } else { path_in(p, true) } }])
+}
+
 /// `html` in Korean when `ko`.
 pub fn page(html: str, ko: bool) -> str {
     if !ko { return html; }
