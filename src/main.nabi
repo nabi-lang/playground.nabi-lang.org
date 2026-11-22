@@ -1118,7 +1118,7 @@ fn fill(html: str, l: Lang) -> str {
     let docs = if l.is_en() { "https://docs.nabi-lang.org/latest" } else { "https://docs.nabi-lang.org/latest/" + l.slug() };
     let sites = chrome::Sites { home: "https://nabi-lang.org", docs: docs, registry: "https://packages.nabi-lang.org", playground: lang::path_in("/", l), current: "playground" };
     let lost = chrome::not_found(l.words().not_found, lang::words(l).no_page, [(lang::path_in("/", l), lang::words(l).back)]);
-    html.replace("<!--web:fonts-->\n", chrome::fonts_for("/", l)).replace("<!--web:theme-button-->", chrome::theme_button_for(l)).replace("<!--web:header-sites-->", chrome::header_sites_for(sites, l)).replace("<!--web:credits-->", f"<span>{chrome::LICENSE}</span> · {chrome::MADE_BY}").replace("<!--web:social-->", chrome::SOCIAL).replace("<!--web:legal-->", chrome::legal_links_for(l)).replace("<!--web:theme-seg-->", chrome::theme_seg_for(l)).replace("<!--web:not-found-->", lost).replace("<!--web:wordmark-->", chrome::wordmark("Nabi"))
+    html.replace("<!--web:fonts-->\n", chrome::fonts_for("/", l)).replace("<!--web:theme-button-->", chrome::theme_button_for(l)).replace("<!--web:header-sites-->", chrome::header_sites_for(sites, l)).replace("<!--web:credits-->", f"<span>{chrome::LICENSE}</span> · {chrome::MADE_BY}").replace("<!--web:social-->", chrome::SOCIAL).replace("<!--web:legal-->", chrome::legal_links_with(l, "playground.nabi-lang.org")).replace("<!--web:theme-seg-->", chrome::theme_seg_for(l)).replace("<!--web:not-found-->", lost).replace("<!--web:wordmark-->", chrome::wordmark("Nabi"))
             .replace("<!--web:icons-->\n", chrome::icons("/"))
 }
 
