@@ -1011,7 +1011,7 @@ fn main() throws {
             };
             if ACTIVE.fetch_add(1i64) >= MAX_CONNS {
                 ACTIVE.fetch_sub(1i64);
-                try http::send(s, 503, ["Content-Type: text/plain; charset=utf-8"], "busy\n", false) catch _ {};
+                try http::send(s, 503, ["Content-Type: text/plain; charset=utf-8", "Retry-After: 5"], "busy\n", false) catch _ {};
                 try s.close() catch _ {};
                 continue;
             }
