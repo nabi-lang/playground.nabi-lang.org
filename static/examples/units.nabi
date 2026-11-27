@@ -1,0 +1,20 @@
+// Quantities with the `units` package: a number with a unit suffix has
+// its unit's type, `→` converts, and adding a mass to a length is a
+// compile error.
+use units::kinds::Mass;
+use units::symbols::{g, kg, lb};
+
+fn total(items: List<Mass>) -> Mass {
+    let sum = 0kg;
+    for x in items { sum = sum + x; }
+    sum
+}
+
+fn main() {
+    let bag = 10kg + 540g;
+    println(bag);
+    println(bag → g);
+    println(f"{bag → lb:.2}");
+    println(f"{total([1.5kg, 250g, 3lb]) → kg:.2}");
+    // Import `m` too, and `10kg + 3m` is an error: Mass + Length.
+}
