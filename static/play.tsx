@@ -126,7 +126,7 @@ diagBtn.addEventListener("click", () => {
 const OFF = new Set((document.querySelector<HTMLMetaElement>('meta[name="nabi-examples-off"]')?.content ?? "").split(","));
 const EXAMPLES: [file: string, label: string][] = [
   "hello", "sums", "none", "errors", "iter", "structs", "input",
-  "json", "stats", "linalg", "plot", "error", "try",
+  "json", "stats", "linalg", "plot", "units", "literals", "error", "try",
 ].filter((f) => !OFF.has(f)).map((f) => [f, T.examples[f] ?? f]);
 // "Code from the link" joins the list once there is such code.
 let hasLink = false;

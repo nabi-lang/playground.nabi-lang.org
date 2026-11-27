@@ -1663,8 +1663,8 @@ fn translated_pages() {
 #[test]
 fn examples_need_their_packages() {
     expect(examples_off("/d", PACKAGES) == "", examples_off("/d", PACKAGES));
-    expect(examples_off("/d", "json,spec=special,stats") == "linalg,plot", examples_off("/d", "json,spec=special,stats"));
-    expect(examples_off("", PACKAGES) == "json,linalg,plot,stats", examples_off("", PACKAGES));
+    expect(examples_off("/d", "json,spec=special,stats") == "linalg,plot,units", examples_off("/d", "json,spec=special,stats"));
+    expect(examples_off("", PACKAGES) == "json,linalg,plot,stats,units", examples_off("", PACKAGES));
     expect(uses("use plot;", "plot") && uses("x = stats::mean(a)", "stats") && uses("#[derive(json::Json)]", "json"), "uses");
     expect(!uses("let plots = 1; myplot::x(); std::plot::y(); plot(1);", "plot"), "not uses");
     expect(!uses(code_only("// table::x\nlet s = \"table::\";"), "table"), "comments and strings");
