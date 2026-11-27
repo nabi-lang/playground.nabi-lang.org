@@ -155,9 +155,11 @@ let mine = "";
 let linked: string | null = null;
 const resetBtn = $<HTMLButtonElement>("reset");
 
-// The example a #example=<name> address names, or null.
+// The example a #example=<name> address names, or null. What follows
+// the name is ignored: a link pasted from prose often carries a `)` or
+// `.` (or its %-escape) along with it.
 function exampleIn(hash: string): string | null {
-  const m = hash.match(/^#example=([\w-]+)(?:&|$)/);
+  const m = hash.match(/^#example=([\w-]+)/);
   return m && NAMES.has(m[1]!) ? m[1]! : null;
 }
 // The address of a view: an example by name, else the bare page. A
