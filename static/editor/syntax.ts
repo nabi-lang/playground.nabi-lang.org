@@ -1,7 +1,7 @@
 // Highlighting, folding and indentation for the editor. Colours come
 // from nabi-syntax's tree-sitter grammar once highlight.js has loaded
 // (play.tsx hands the Highlighter over), else from the small lexer
-// below; either way one class index a UTF-16 unit (k t s n c a m, as
+// below; either way one class index a UTF-16 unit (k t s n c a m f, as
 // the docs colour them), which CodeMirror's positions count too, painted
 // as mark decorations over the visible lines.
 import { RangeSetBuilder, StateEffect } from "@codemirror/state";
@@ -12,7 +12,7 @@ import { foldService, indentService, indentUnit, getIndentUnit } from "@codemirr
 import type { Highlighter } from "../highlight.ts";
 
 /** Index 0 is plain text (highlight.ts's CLASSES). */
-export const CLASSES = ["", "k", "t", "s", "n", "c", "a", "m"];
+export const CLASSES = ["", "k", "t", "s", "n", "c", "a", "m", "f"];
 export const COMMENT = 5;
 export const STRING = 3;
 
@@ -21,16 +21,20 @@ const KEYWORDS = new Set(("fn let mut if else match for in while loop return bre
   "pub use mod const static type as is none true false throws try catch async await yield self Self where ref " +
   "unsafe extern defer using move dyn any throw finally rethrows union some pkg sub sup macro gen do").split(" "));
 const PRIMS = new Set("i8 i16 i32 i64 i128 isize u8 u16 u32 u64 u128 usize f32 f64 bool char str".split(" "));
-const TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|(f?"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)')|(#!?\[[^\]\n]*\]?)|(\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?(?:[iu](?:8|16|32|64|128|size)|f32|f64)?\b|\b0x[\da-fA-F_]+\b)|([A-Za-z_][A-Za-z0-9_]*)(!?)/g;
+const TOKEN = /(\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$))|(f?"(?:[^"\\\n]|\\.)*"?|'(?:[^'\\\n]|\\.)')|(#!?\[[^\]\n]*\]?)|(\b\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?(?:[iu](?:8|16|32|64|128|size)|f32|f64)?\b|\b0x[\da-fA-F_]+\b)|([A-Za-z_][A-Za-z0-9_]*)(!?)(?=([ \t]*\()?)/g;
 
 /** The lexer's classes of `text`, until tree-sitter is there. */
 export function lex(text: string): Uint8Array {
   const out = new Uint8Array(text.length);
+  let fnEnd = -1;
   for (const m of text.matchAll(TOKEN)) {
-    const [w, com, str, attr, num, id, bang] = m;
+    const [w, com, str, attr, num, id, bang, call] = m;
+    // A name after `fn`, or before `(`: a function, as the editors read it.
     const k = com ? COMMENT : str ? STRING : attr ? 6 : num ? 4
-      : id && bang ? 7 : id && KEYWORDS.has(id) ? 1 : id && (PRIMS.has(id) || /^[A-Z]/.test(id)) ? 2 : 0;
+      : id && bang ? 7 : id && KEYWORDS.has(id) ? 1 : id && (PRIMS.has(id) || /^[A-Z]/.test(id)) ? 2
+      : id && (call !== undefined || (fnEnd >= 0 && /^[ \t]+$/.test(text.slice(fnEnd, m.index)))) ? 8 : 0;
     if (k) out.fill(k, m.index, m.index + w.length);
+    fnEnd = id === "fn" ? m.index + w.length : -1;
   }
   return out;
 }

@@ -5,7 +5,7 @@
 // what changed (tree.edit, then parse with the old tree).
 //
 // Captures map to the classes nabi-syntax's own highlighter gives the
-// docs (k t s n c a m), so the editor and the docs agree in both themes.
+// docs (k t s n c a m f), so the editor and the docs agree in both themes.
 import { Edit, Language, Parser, Query } from "web-tree-sitter";
 import type { Point, Tree } from "web-tree-sitter";
 
@@ -17,7 +17,7 @@ export interface Highlighter {
 }
 
 /** Index 0 is plain text. */
-export const CLASSES = ["", "k", "t", "s", "n", "c", "a", "m"];
+export const CLASSES = ["", "k", "t", "s", "n", "c", "a", "m", "f"];
 
 // `@embedded` (an f-string hole) is code: it clears the string's colour
 // under it, and the hole's own captures paint over that.
@@ -26,6 +26,7 @@ const CLEAR = 255;
 // The class of a capture: its first dotted part, or the whole name.
 function classOf(name: string): number {
   if (name === "function.macro") return 7;
+  if (name === "function" || name === "function.call") return 8;
   if (name === "embedded") return CLEAR;
   // A hole's braces are the string's, as in the docs.
   if (name === "punctuation.special") return 3;
