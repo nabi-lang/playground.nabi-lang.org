@@ -1,0 +1,19 @@
+// Async tasks: `async fn` returns at its first `await`, `spawn_local`
+// starts tasks that run side by side, and `join` waits for all of
+// them. Three 300 ms jobs finish in about 300 ms, not 900.
+use core::task::{join, sleep, spawn_local};
+use core::time::{Duration, Instant};
+
+async fn brew(name: str, ms: i64) -> str {
+    println(f"start {name}");
+    await sleep(Duration::ms(ms));
+    println(f"done  {name}");
+    name
+}
+
+async fn main() {
+    let t0 = Instant::now();
+    let tasks = [spawn_local(brew("tea", 300)), spawn_local(brew("coffee", 200)), spawn_local(brew("cocoa", 100))];
+    let all = await join(tasks);
+    println(f"{all:?} in about {(t0.elapsed().as_ms() + 50) / 100 * 100} ms");
+}

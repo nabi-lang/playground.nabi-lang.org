@@ -1,0 +1,25 @@
+// Generators: a `yield fn` hands out values one at a time, and the
+// caller iterates it like any other sequence; nothing runs ahead.
+yield fn fib() -> u64 {
+    let a = 0u64;
+    let b = 1u64;
+    loop {
+        yield a;
+        let t = a + b;
+        a = b;
+        b = t;
+    }
+}
+
+yield fn primes_below(n: u64) -> u64 {
+    for k in 2u64..n {
+        if (2u64..k).all(|d| k % d != 0) { yield k; }
+    }
+}
+
+fn main() {
+    println(f"fib: {fib().take(12).to_list():?}");
+    println(f"primes: {primes_below(40).to_list():?}");
+    let big = fib().find(|x| x > 1000) ?? 0;
+    println(f"first fib over 1000: {big}");
+}

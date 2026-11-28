@@ -1,0 +1,37 @@
+// Your own operators: a trait method marked `#[infix("⊙", like = "*")]`
+// makes `a ⊙ b` call it, with `*`'s precedence. Prefix and postfix
+// operators work the same way; `√` is one the core library binds.
+use core::fmt::{Display, Formatter, FmtError};
+
+struct V2 { x: f64; y: f64; }
+
+trait Dot {
+    #[infix("⊙", like = "*")]
+    fn dot(self, o: V2) -> f64;
+}
+
+trait Norm {
+    #[prefix("‖", like = "-")]
+    fn norm(self) -> f64;
+}
+
+trait Deg {
+    #[postfix("°", like = "?")]
+    fn deg(self) -> f64;
+}
+
+impl Dot for V2 { fn dot(self, o: V2) -> f64 { self.x * o.x + self.y * o.y } }
+impl Norm for V2 { fn norm(self) -> f64 { √(self ⊙ self) } }
+impl Deg for f64 { fn deg(self) -> f64 { self * f64::PI / 180.0 } }
+
+impl Display for V2 {
+    fn fmt(self, ref f: Formatter) throws (FmtError) { try f.write_str(f"({self.x}, {self.y})") }
+}
+
+fn main() {
+    let a = V2 { x: 3.0, y: 4.0 };
+    let b = V2 { x: 1.0, y: 0.0 };
+    println(f"{a} ⊙ {b} = {a ⊙ b}");
+    println(f"‖{a} = {‖a}");
+    println(f"cos 60° = {60.0°.cos():.3}");
+}

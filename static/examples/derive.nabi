@@ -1,0 +1,24 @@
+// A derive of your own: the `@derive` meta block writes the impl, with
+// `@for_fields` repeating its body for each field of the type.
+trait Describe { fn describe(self) -> str; }
+
+#[impl_derive(Describe)] pub @derive {
+    impl Describe for @Self {
+        fn describe(self) -> str {
+            let out = StrBuf::new();
+            out.push_str(@Self.as_str());
+            @for_fields {
+                out.push_str(f" @field.name={self.@field:?}");
+            }
+            out.to_str()
+        }
+    }
+}
+
+#[derive(Describe)]
+struct Book { title: str; year: i32; }
+
+fn main() {
+    let b = Book { title: "Dune", year: 1965 };
+    println(b.describe());
+}

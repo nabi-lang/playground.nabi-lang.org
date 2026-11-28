@@ -1,0 +1,20 @@
+// Reflection: a type knows its name and size, and with
+// `#[derive(Inspect)]` its fields too, read by name at run time.
+#[derive(Inspect, Debug)]
+struct Planet {
+    name: str;
+    moons: i32;
+    au: f64;
+}
+
+fn main() {
+    println(f"{i32::type_name()} is {i32::size()} bytes");
+    println(f"Planet fields: {Planet::field_names():?}");
+    let p = Planet { name: "Mars", moons: 2, au: 1.52 };
+    for f in Planet::fields() {
+        println(f"  {f.name}: {f.type_name}");
+    }
+    println(f"{p:?}");
+    let v: i32 | str = "hi";
+    println(f"v holds a {v.type_name_of_val()}");
+}

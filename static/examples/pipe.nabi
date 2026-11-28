@@ -1,0 +1,19 @@
+// Pipes, trailing closures and dotted (broadcast) operators: `a |> f`
+// is `f(a)`, `xs.map |x| { .. }` passes the block as the last
+// argument, and `.*` `.+` work element by element in one loop.
+fn squares(n: i64) -> List<i64> { (1..=n).map(|x| x * x).to_list() }
+fn total(xs: List<i64>) -> i64 { xs.fold(0, |a, x| a + x) }
+
+fn main() {
+    let s = 10 |> squares |> total;
+    println(f"sum of squares to 10: {s}");
+
+    let names = ["ada", "grace", "linus"];
+    let loud = names.map |n| { n.to_uppercase() }.to_list();
+    println(f"{loud:?}");
+
+    let x = [1.0, 2.0, 3.0, 4.0];
+    let y = 2.0 .* x .+ 1.0;
+    println(f"2x + 1 = {y:?}");
+    println(f"sqrt: {f64::sqrt.(x):?}");
+}
