@@ -1,0 +1,33 @@
+// `using` scopes a resource: when the block ends, with a value or with
+// a thrown error, the values are dropped, the last one first.
+struct Conn { name: str; }
+
+impl Drop for Conn {
+    fn drop(ref self) { println(f"close {self.name}"); }
+}
+
+fn open(name: str) -> Conn {
+    println(f"open {name}");
+    Conn { name: name }
+}
+
+fn query(c: Conn, q: str) throws (str) -> i32 {
+    if q.is_empty() { throw f"empty query on {c.name}"; }
+    q.len() as i32
+}
+
+fn main() {
+    let n = using a = open("db"), b = open("cache") {
+        println(f"use {a.name} and {b.name}");
+        42
+    };
+    println(f"got {n}");
+
+    let r = try {
+        using c = open("log") { try query(c, "") }
+    } catch e {
+        println(f"error: {e}");
+        -1
+    };
+    println(f"got {r}");
+}
