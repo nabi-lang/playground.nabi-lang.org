@@ -19,9 +19,16 @@ export interface Highlighter {
 /** Index 0 is plain text. */
 export const CLASSES = ["", "k", "t", "s", "n", "c", "a", "m"];
 
+// `@embedded` (an f-string hole) is code: it clears the string's colour
+// under it, and the hole's own captures paint over that.
+const CLEAR = 255;
+
 // The class of a capture: its first dotted part, or the whole name.
 function classOf(name: string): number {
   if (name === "function.macro") return 7;
+  if (name === "embedded") return CLEAR;
+  // A hole's braces are the string's, as in the docs.
+  if (name === "punctuation.special") return 3;
   if (name === "variable.builtin" || name === "boolean" || name === "constant.builtin") return 1;
   const head = name.split(".")[0];
   switch (head) {
@@ -81,9 +88,10 @@ async function load(base: string): Promise<Highlighter> {
     const caps = query.captures(t.rootNode, { startIndex: from * 2, endIndex: to * 2 })
       .map((c) => ({ s: c.node.startIndex, e: c.node.endIndex, p: c.patternIndex, k: byName.get(c.name) ?? 0 }))
       .sort((x, y) => (y.e - y.s) - (x.e - x.s) || x.p - y.p);
-    // A plain capture (a variable, a bracket) leaves what is under it:
-    // an interpolation stays in its string's colour, as in the docs.
-    for (const c of caps) if (c.k) out.fill(c.k, Math.max(c.s, from), Math.min(c.e, to));
+    // A plain capture (a variable, a bracket) leaves what is under it.
+    for (const c of caps) {
+      if (c.k) out.fill(c.k === CLEAR ? 0 : c.k, Math.max(c.s, from), Math.min(c.e, to));
+    }
   };
 
   return {
